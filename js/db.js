@@ -192,6 +192,7 @@ export async function addStoresToRound(roundId, storeIds) {
       prep: { checkedAgainstImage: false, confirmedBy: null, confirmedAt: null },
       delivery: { selectionMode: null, confirmedBy: null, confirmedAt: null },
       exceptionReasons: {}, review: null, submittedAt: null, submittedBy: null,
+      billCheck: null, fieldShowTime: false, // V2
     });
     added.push(rs);
   }
