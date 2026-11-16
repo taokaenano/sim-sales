@@ -19,8 +19,17 @@ async function askWho() {
   const r = await modal(`<h2>ผู้ใช้งาน</h2>
     <label class="f">ชื่อ</label><input type="text" id="un" value="${esc(USER.name)}">
     <label class="f">บทบาท</label><select id="ur"><option value="sales">พนักงานขาย</option><option value="central">ส่วนกลาง</option></select>
-    <div class="row" style="margin-top:14px"><button class="btn grow" data-close>ยกเลิก</button><button class="btn primary grow" id="ok">บันทึก</button></div>`,
-  { onMount: (m, close) => { m.querySelector('#ur').value = USER.role; m.querySelector('#ok').onclick = () => { const n = m.querySelector('#un').value.trim(); if (!n) return toast('ต้องใส่ชื่อ', true); close({ n, r: m.querySelector('#ur').value }); }; } });
+    <div class="row" style="margin-top:14px"><button class="btn grow" data-close>ยกเลิก</button><button class="btn primary grow" id="ok">บันทึก</button></div>
+    ${USER.name ? '<button class="btn danger" id="logout" style="width:100%;margin-top:10px">ออกจากระบบ</button>' : ''}`,
+  { onMount: (m, close) => {
+    m.querySelector('#ur').value = USER.role;
+    m.querySelector('#ok').onclick = () => { const n = m.querySelector('#un').value.trim(); if (!n) return toast('ต้องใส่ชื่อ', true); close({ n, r: m.querySelector('#ur').value }); };
+    const lo = m.querySelector('#logout'); if (lo) lo.onclick = () => close('logout');
+  } });
+  if (r === 'logout') {
+    await db.audit({ entity: 'user', entityId: USER.name, action: 'logout' });
+    await db.setSetting('userName', ''); await db.setSetting('role', 'sales'); await refreshWho(); nav(''); toast('ออกจากระบบแล้ว · ข้อมูลยังอยู่ในเครื่อง'); return;
+  }
   if (r) { await db.setSetting('userName', r.n); await db.setSetting('role', r.r); await refreshWho(); route(); }
 }
 
