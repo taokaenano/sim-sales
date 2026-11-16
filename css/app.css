@@ -115,3 +115,13 @@ tr.bad td { background: var(--red-l); }
 .kv .v { font-size: 18px; font-weight: 700; }
 .zoomimg { width: 100%; height: auto; display: block; }
 iframe.pdf, .pdfpages canvas { width: 100%; border: 1px solid var(--g2); background: #fff; margin-bottom: 8px; display: block; }
+
+.scan-wrap { position: fixed; inset: 0; z-index: 70; background: #000; color: #fff; display: flex; flex-direction: column; }
+.scan-top { display: flex; gap: 10px; align-items: center; padding: calc(10px + env(safe-area-inset-top)) 14px 10px; background: var(--red); }
+.scan-title { font-weight: 700; font-size: 16px; }
+.scan-count { font-size: 15px; } .scan-count b { font-size: 26px; font-variant-numeric: tabular-nums; }
+.scan-view { position: relative; flex: 1; overflow: hidden; }
+.scan-view video, .scan-view canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.scan-list { padding: 6px 14px; min-height: 64px; background: #111; }
+.scan-bottom { display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); background: #111; }
+.scan-bottom .btn { flex: 1; }
