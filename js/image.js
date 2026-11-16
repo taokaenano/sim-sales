@@ -6,31 +6,45 @@ const MAX_BYTES = 30 * 1024 * 1024;
 const OK_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 /** ตรวจชนิด/ขนาดไฟล์ คืนข้อความผิดพลาดภาษาไทย หรือ null */
+export const MAX_SIDE = 4096; // ภาพที่ใช้ประมวลผล — ไม่เกินขีดจำกัด canvas ของ iPhone (~16.7 ล้านพิกเซล)
+
+/** ตรวจชนิด/ขนาดไฟล์ คืนข้อความผิดพลาดภาษาไทย หรือ null */
 export function checkImageFile(file, { allowPdf = false } = {}) {
   const name = (file.name || '').toLowerCase();
-  if (/\.(heic|heif)$/.test(name) || /heic|heif/.test(file.type)) {
-    return `ไฟล์ ${file.name} เป็น HEIC ซึ่งเบราว์เซอร์นี้ยังเปิดไม่ได้ — ตั้งกล้องเป็น JPEG (iPhone: ตั้งค่า > กล้อง > รูปแบบ > "เข้ากันได้มากที่สุด") หรือแปลงเป็น JPG ก่อนอัปโหลด`;
-  }
   if (allowPdf && (file.type === 'application/pdf' || name.endsWith('.pdf'))) {
     return file.size > MAX_BYTES ? `ไฟล์ ${file.name} ใหญ่เกิน 30 MB` : null;
   }
-  if (!OK_TYPES.includes(file.type) && !/\.(jpe?g|png|webp)$/.test(name)) {
-    return `ไม่รองรับไฟล์ ${file.name} (${file.type || 'ไม่ทราบชนิด'}) — ใช้ JPG, PNG, WEBP${allowPdf ? ' หรือ PDF' : ''}`;
-  }
+  const isImg = OK_TYPES.includes(file.type) || /^image\//.test(file.type) || /\.(jpe?g|png|webp|heic|heif)$/.test(name);
+  if (!isImg) return `ไม่รองรับไฟล์ ${file.name || ''} (${file.type || 'ไม่ทราบชนิด'}) — ใช้ JPG, PNG, WEBP${allowPdf ? ' หรือ PDF' : ''}`;
   if (file.size > MAX_BYTES) return `ไฟล์ ${file.name} ใหญ่เกิน 30 MB`;
   return null;
 }
 
-/** โหลดภาพโดยหมุนตาม EXIF Orientation แล้ว */
-export async function loadBitmap(blob) {
-  try { return await createImageBitmap(blob, { imageOrientation: 'from-image' }); }
-  catch {
-    const url = URL.createObjectURL(blob);
-    try {
-      const img = new Image(); img.src = url; await img.decode();
-      return await createImageBitmap(img);
-    } finally { URL.revokeObjectURL(url); }
-  }
+async function decodeImg(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image(); img.decoding = 'async'; img.src = url;
+    await img.decode();
+    return img;
+  } catch {
+    const heic = /heic|heif/i.test(blob.type || '') || /\.(heic|heif)$/i.test(blob.name || '');
+    throw new Error(heic ? 'เบราว์เซอร์นี้เปิดไฟล์ HEIC ไม่ได้ — ตั้งกล้องเป็น JPEG (iPhone: ตั้งค่า > กล้อง > รูปแบบ > "เข้ากันได้มากที่สุด") แล้วถ่ายใหม่'
+      : 'เปิดภาพนี้ไม่ได้ — ลองถ่ายใหม่หรือเลือกภาพอื่น');
+  } finally { URL.revokeObjectURL(url); }
+}
+
+/** ขนาดภาพจริง (หลังหมุนตาม EXIF) */
+export async function imageSize(blob) { const img = await decodeImg(blob); return { width: img.naturalWidth, height: img.naturalHeight }; }
+
+/** โหลดภาพโดยหมุนตาม EXIF Orientation แล้ว และย่อไม่ให้ด้านยาวเกิน maxSide (ไฟล์ต้นฉบับไม่ถูกแก้) */
+export async function loadBitmap(blob, { maxSide = MAX_SIDE } = {}) {
+  const img = await decodeImg(blob);
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const sc = Math.min(1, maxSide / Math.max(w, h));
+  const W = Math.max(1, Math.round(w * sc)), H = Math.max(1, Math.round(h * sc));
+  const c = new OffscreenCanvas(W, H);
+  const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, W, H);
+  return createImageBitmap(c);
 }
 
 /** อ่านเวลาจาก EXIF แบบรักษาค่าต้นฉบับ ไม่แปลงเขตเวลาเอง */
@@ -67,7 +81,7 @@ export async function saveOriginal(file, { roundId, rsId = null, kind, captureSo
   if (est && est.free < file.size * 3 + 20e6) throw new Error('พื้นที่เก็บข้อมูลในเครื่องเหลือน้อย — ลบรอบงานเก่าหรือ Export แล้วล้างข้อมูลก่อนเพิ่มภาพ');
   const exif = file.type === 'application/pdf' ? null : await readExifTime(file);
   let w = null, h = null;
-  if (file.type !== 'application/pdf') { const bmp = await loadBitmap(file); w = bmp.width; h = bmp.height; bmp.close?.(); }
+  if (file.type !== 'application/pdf') { const d = await imageSize(file); w = d.width; h = d.height; }
   const rec = await db.insert('files', {
     roundId, rsId, kind, role: 'original', parentId: null,
     blob: file, mime: file.type || 'application/octet-stream', size: file.size, name: file.name || `${kind}.jpg`,
