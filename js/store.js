@@ -4,6 +4,7 @@ import { esc, fmtDateTime, nowIso, uid } from './util.js';
 import { $, $$, toast, guard, modal, confirmBox, blobSrc, pickFiles, badgeFor, zoomImage, nav } from './ui.js';
 import { checkImageFile, saveOriginal, makeDerived, loadBitmap, timeSourceText } from './image.js';
 import { evaluate, loadStoreData, signatureText, OUTCOME_TEXT, REVIEW_TEXT } from './logic.js';
+import { liveScan } from './scanner.js';
 import { decodeImage, readPrinted, compareBarcodeVsPrinted, referenceCrop, CHECK_TEXT, RELATION_TEXT } from './barcode.js';
 import { warpBill, readBill, defaultQuad, cellBlob, billSummary, TEMPLATE as T, ITEM_TYPES, STATE_TEXT, SIG_TEXT } from './bill.js';
 
@@ -40,12 +41,12 @@ async function invalidatePrep(rs, why) {
 }
 
 // ======================= Barcode =======================
-async function processBarcodeFile(f, ctx, onStep) {
+async function processBarcodeFile(f, ctx, onStep, pre = null) {
   const { rs } = ctx;
   await db.update('files', f.id, null, x => ({ ...x, proc: { state: 'running', at: nowIso() } }));
   try {
     onStep('ถอด Barcode…', 0);
-    const res = await decodeImage(f.blob, p => onStep('ถอด Barcode…', p * 0.5));
+    const res = pre || await decodeImage(f.blob, p => onStep('ถอด Barcode…', p * 0.5));
     const result = { found: res.found.length, added: 0, dupSame: 0, dupOther: [], failed: res.failed.map(x => x.quad), width: res.width, height: res.height, boxes: [] };
     let i = 0; const existing = await db.simsOfRs(rs.id); let order = existing.length;
     for (const b of res.found) {
@@ -120,7 +121,7 @@ async function barcodeTab(el, ctx) {
   const msisdnMap = new Map(); for (const s of all) if (s.msisdn) msisdnMap.set(s.msisdn, (msisdnMap.get(s.msisdn) || 0) + 1);
   const confirmedN = sims.filter(s => s.confirmed).length;
   el.innerHTML = `
-    ${locked ? '' : `<div class="btn-grid"><button class="btn primary" id="cam">ถ่ายภาพ Barcode</button><button class="btn" id="up">เลือกภาพ</button></div>`}
+    ${locked ? '' : `<button class="btn primary big" id="live">สแกนสด</button><div class="btn-grid" style="margin-top:8px"><button class="btn" id="cam">ถ่ายภาพ</button><button class="btn" id="up">เลือกภาพ (หลายภาพได้)</button></div>`}
     <div id="progress" class="card hidden"><div id="ptext" class="small"></div><div class="prog"><i id="pbar"></i></div></div>
     <div class="card"><div class="row between"><h2 style="margin:0">ภาพ (${files.length})</h2></div>
       <div class="list" style="margin-top:8px">${files.map(f => `<div class="item" style="align-items:flex-start"><img src="${blobSrc(f.id, f.blob)}" style="width:64px;height:64px;object-fit:cover;border-radius:8px">
@@ -155,6 +156,22 @@ async function barcodeTab(el, ctx) {
   };
   if (!locked) {
     $('#cam').onclick = guard(async () => runFiles(await addImages(ctx, 'barcode', true)));
+    $('#live').onclick = guard(async () => {
+      const known = new Set((await db.simsOfRound(rs.roundId)).map(x => x.serial).filter(Boolean));
+      const res = await liveScan({ title: `${rs.storeCodeSnap} · ${rs.storeNameSnap}`, knownSerials: known, expected: rs.expectedCount });
+      if (!res || !res.frames.length) return;
+      let added = 0, dupOther = 0, k = 0;
+      for (const fr of res.frames) {
+        prog(`บันทึกภาพสแกน ${++k}/${res.frames.length}`, k / res.frames.length);
+        const file = new File([fr.blob], `scan-${Date.now()}-${k}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+        const sv = await saveOriginal(file, { roundId: rs.roundId, rsId: rs.id, kind: 'barcode', captureSource: 'camera' });
+        await makeDerived(sv.file, { storeCode: rs.storeCodeSnap, storeName: rs.storeNameSnap });
+        const r = await processBarcodeFile(sv.file, ctx, prog, { found: fr.found, failed: [], bitmap: fr.bitmap, width: fr.bitmap.width, height: fr.bitmap.height });
+        added += r.added; dupOther += r.dupOther.length;
+      }
+      await db.audit({ entity: 'roundStore', entityId: rs.id, roundId: rs.roundId, action: 'live_scan', after: { frames: res.frames.length, added } });
+      toast(`สแกนสด: เพิ่ม ${added} รายการ${dupOther ? ` · ซ้ำร้านอื่น ${dupOther}` : ''}`); ctx.reload();
+    });
     $('#up').onclick = guard(async () => runFiles(await addImages(ctx, 'barcode', false)));
     $$('[data-proc]').forEach(b => b.onclick = guard(async () => runFiles([files.find(f => f.id === b.dataset.proc)])));
     $$('[data-rmf]').forEach(b => b.onclick = guard(async () => {
