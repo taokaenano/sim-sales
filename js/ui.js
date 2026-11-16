@@ -54,11 +54,28 @@ export function blobSrc(id, blob) {
   let u = urls.get(id); if (!u) { u = URL.createObjectURL(blob); urls.set(id, u); } return u;
 }
 
+// ช่องรับไฟล์ตัวเดียวที่ผูกกับหน้าเว็บถาวร — Safari บน iPhone ไม่ส่งรูปจากกล้องกลับเข้าช่องที่ไม่ได้อยู่ในหน้า
+let picker;
 export function pickFiles({ accept = 'image/*', multiple = true, capture = false } = {}) {
+  if (!picker) {
+    picker = document.createElement('input'); picker.type = 'file'; picker.id = 'file-picker';
+    picker.setAttribute('aria-hidden', 'true'); picker.tabIndex = -1;
+    picker.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+    document.body.appendChild(picker);
+  }
+  const i = picker;
+  i.value = ''; i.accept = accept; i.multiple = multiple;
+  if (capture) i.setAttribute('capture', 'environment'); else i.removeAttribute('capture');
   return new Promise(res => {
-    const i = document.createElement('input'); i.type = 'file'; i.accept = accept; i.multiple = multiple;
-    if (capture) i.setAttribute('capture', 'environment');
-    i.onchange = () => res([...i.files]); i.click();
+    let done = false;
+    const finish = f => { if (done) return; done = true; i.onchange = null; i.oncancel = null; res(f); };
+    i.onchange = () => {
+      const f = [...(i.files || [])];
+      if (f.length && /image/.test(accept)) toast(f.length > 1 ? `กำลังบันทึกภาพ ${f.length} ภาพ…` : 'กำลังบันทึกภาพ…');
+      finish(f);
+    };
+    i.oncancel = () => finish([]);
+    i.click();
   });
 }
 
@@ -73,7 +90,8 @@ export function currentRoute() { return _route; }
 export function onRoute(fn) { _subs.push(fn); }
 export function nav(path) {
   _route = String(path || '').replace(/^#\/?/, '');
-  try { history.replaceState(null, '', '#' + (_route ? 'p-' + _route.replace(/[^a-zA-Z0-9-]/g, '-') : '')); } catch {}
+  // จำหน้าปัจจุบันไว้ใน URL ถ้าเบราว์เซอร์โหลดหน้าใหม่ (เช่น ระหว่างเปิดกล้อง) จะกลับมาหน้าเดิม
+  try { history.replaceState(null, '', '#/' + _route); } catch {}
   _subs.forEach(f => f());
 }
 document.addEventListener('click', e => {
