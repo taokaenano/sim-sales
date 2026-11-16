@@ -31,28 +31,40 @@ function center(q) { return { x: (q.topLeft.x + q.topRight.x + q.bottomRight.x +
  * คืน { found:[{text, format, quad}], failed:[{quad}] } พิกัดอยู่ในระบบภาพต้นฉบับ (หลังหมุนตาม EXIF)
  */
 export async function decodeImage(blob, onProgress = () => {}) {
-  const Z = await zx();
   const bmp = await loadBitmap(blob);
-  const W = bmp.width, H = bmp.height, L = Math.max(W, H);
-  const found = new Map(); const failed = [];
-  const opts = { formats: FORMATS, tryHarder: true, tryRotate: true, tryInvert: false, maxNumberOfSymbols: 255, returnErrors: true };
-  const passes = [];
-  const baseScale = Math.min(4, Math.max(1, 3200 / L));
-  passes.push({ x: 0, y: 0, w: W, h: H, s: Math.min(baseScale, 4000 / L) });
-  for (const n of [2, 3]) {
-    const tw = W / n * 1.3, th = H / n * 1.3;
+  return decodeBitmap(bmp, onProgress);
+}
+
+/** สร้างรายการรอบสแกน: ทั้งภาพ + ช่องซ้อนกันหลายขนาด (ยิ่งช่องเล็ก ยิ่งขยายมาก) + วิธีแยกขาวดำ 2 แบบ */
+function planPasses(W, H, { quick = false } = {}) {
+  const L = Math.max(W, H); const passes = [];
+  if (quick) { passes.push({ x: 0, y: 0, w: W, h: H, s: Math.min(1.5, Math.max(1, 2400 / L)), bin: 'LocalAverage' }); return passes; }
+  passes.push({ x: 0, y: 0, w: W, h: H, s: Math.min(Math.min(4, Math.max(1, 3200 / L)), 4000 / L), bin: 'LocalAverage' });
+  for (const [n, bin] of [[2, 'LocalAverage'], [3, 'LocalAverage'], [4, 'LocalAverage'], [3, 'GlobalHistogram']]) {
+    const tw = W / n * 1.35, th = H / n * 1.35;
     for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
       const x = Math.max(0, Math.min(W - tw, (W / n) * i - (tw - W / n) / 2));
       const y = Math.max(0, Math.min(H - th, (H / n) * j - (th - H / n) / 2));
-      passes.push({ x, y, w: Math.min(tw, W), h: Math.min(th, H), s: Math.min(4, Math.max(1, 2400 / Math.max(tw, th))) });
+      const w = Math.min(tw, W), h = Math.min(th, H);
+      passes.push({ x, y, w, h, s: Math.min(4, Math.max(1, 2400 / Math.max(w, h))), bin });
     }
   }
+  return passes;
+}
+
+/** ถอดบาร์โค้ดจาก ImageBitmap/canvas (ใช้ทั้งภาพนิ่งและเฟรมจากโหมดสแกนสด) */
+export async function decodeBitmap(bmp, onProgress = () => {}, { quick = false } = {}) {
+  const Z = await zx();
+  const W = bmp.width, H = bmp.height;
+  const found = new Map(); const failed = [];
+  const base = { formats: FORMATS, tryHarder: true, tryRotate: true, tryInvert: false, maxNumberOfSymbols: 255, returnErrors: !quick };
+  const passes = planPasses(W, H, { quick });
   let k = 0;
   for (const p of passes) {
     onProgress(++k / passes.length);
     const id = toImageData(bmp, p.x, p.y, p.w, p.h, p.s);
     let res = [];
-    try { res = await Z.readBarcodes(id, opts); } catch (e) { console.warn(e); }
+    try { res = await Z.readBarcodes(id, { ...base, binarizer: p.bin }); } catch (e) { console.warn(e); }
     for (const r of res) {
       const map = pt => ({ x: p.x + pt.x / p.s, y: p.y + pt.y / p.s });
       const quad = { topLeft: map(r.position.topLeft), topRight: map(r.position.topRight), bottomRight: map(r.position.bottomRight), bottomLeft: map(r.position.bottomLeft) };
