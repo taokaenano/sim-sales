@@ -127,7 +127,7 @@ async function barcodeTab(el, ctx) {
         <div class="grow"><div class="small">${esc(f.name)}</div><div class="statusline">${procBadge(f)}<span class="badge">บันทึกในเครื่องแล้ว</span></div>
         ${f.proc?.result ? `<div class="muted small">เพิ่มใหม่ ${f.proc.result.added} · ซ้ำในร้าน ${f.proc.result.dupSame}${f.proc.result.dupOther.length ? ` · <b style="color:var(--red)">ซ้ำร้านอื่น ${f.proc.result.dupOther.length}: ${esc([...new Set(f.proc.result.dupOther.map(d => d.store))].join(', '))}</b>` : ''}</div>` : ''}
         ${f.proc?.state === 'error' ? `<div class="small" style="color:var(--red)">${esc(f.proc.error)}</div>` : ''}</div>
-        <div class="row" style="flex-direction:column;gap:4px"><button class="btn sm" data-view="${f.id}">ดูตำแหน่ง</button>${locked ? '' : `<button class="btn sm" data-proc="${f.id}">${f.proc?.state === 'done' ? 'ประมวลผลใหม่' : 'ประมวลผล'}</button>`}</div></div>`).join('') || '<div class="muted">ยังไม่มีภาพ</div>'}</div>
+        <div class="row" style="flex-direction:column;gap:4px"><button class="btn sm" data-view="${f.id}">ดูตำแหน่ง</button>${locked ? '' : `<button class="btn sm" data-proc="${f.id}">${f.proc?.state === 'done' ? 'ประมวลผลใหม่' : 'ประมวลผล'}</button><button class="btn sm ghost" data-rmf="${f.id}">ลบภาพ</button>`}</div></div>`).join('') || '<div class="muted">ยังไม่มีภาพ</div>'}</div>
       <div id="ov" class="hidden" style="margin-top:10px"><div class="imgwrap"><canvas id="ovc"></canvas></div><p class="muted small">กรอบแดง = ยังไม่ยืนยัน · เขียว = ยืนยันแล้ว · ส้มประ = คล้าย Barcode แต่ถอดไม่ได้ · ม่วง = ซ้ำกับร้านอื่น</p></div></div>
     <div class="card"><div class="row between"><h2 style="margin:0">รายการซิม (${sims.length})</h2><span class="badge ${confirmedN === sims.length && sims.length ? 'ok' : 'warn'}">ยืนยัน ${confirmedN}/${sims.length}</span></div>
       <div class="row" style="margin-top:8px"><label class="f" style="margin:0">จำนวนที่คาด (ไม่บังคับ)</label><input type="text" inputmode="numeric" id="exp" style="width:90px" value="${rs.expectedCount ?? ''}" ${locked ? 'disabled' : ''}>
@@ -157,6 +157,14 @@ async function barcodeTab(el, ctx) {
     $('#cam').onclick = guard(async () => runFiles(await addImages(ctx, 'barcode', true)));
     $('#up').onclick = guard(async () => runFiles(await addImages(ctx, 'barcode', false)));
     $$('[data-proc]').forEach(b => b.onclick = guard(async () => runFiles([files.find(f => f.id === b.dataset.proc)])));
+    $$('[data-rmf]').forEach(b => b.onclick = guard(async () => {
+      const f = files.find(x => x.id === b.dataset.rmf);
+      const used = sims.filter(s => s.sourceFileId === f.id).length;
+      if (used) throw new Error(`ภาพนี้มีรายการซิม ${used} รายการ — ลบรายการซิมเหล่านั้นก่อน`);
+      const r = await confirmBox('ลบภาพนี้?', { danger: true, ok: 'ลบ', reason: true }); if (!r) return;
+      for (const x of [f, ...(await db.derivedOf(f.id))]) await db.update('files', x.id, null, y => ({ ...y, deletedAt: nowIso(), deleteReason: r }));
+      await db.audit({ entity: 'file', entityId: f.id, roundId: rs.roundId, action: 'delete', reason: r }); ctx.reload();
+    }));
     $('#exp').onchange = guard(async e => { const v = e.target.value.trim(); const n = v === '' ? null : Number(v); if (v !== '' && !Number.isInteger(n)) throw new Error('จำนวนต้องเป็นจำนวนเต็ม'); const cur = await db.get('roundStores', rs.id); await db.update('roundStores', rs.id, cur.version, { expectedCount: n }); ctx.reload(); });
     $$('[data-cf]').forEach(b => b.onclick = guard(async () => { const s = sims.find(x => x.id === b.dataset.cf); await db.update('sims', s.id, s.version, { confirmed: true, confirmedBy: USER.name, confirmedAt: nowIso() }); ctx.reload(); }));
     $('#cfall').onclick = guard(async () => {
