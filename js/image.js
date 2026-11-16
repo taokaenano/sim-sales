@@ -63,13 +63,15 @@ export async function readExifTime(blob) {
   } catch { return null; }
 }
 
-/** ข้อความแหล่งที่มาของเวลา (ตามข้อกำหนดข้อ 11) */
+/** เวลาถ่ายพร้อมแหล่งที่มา — ไม่ใช้เวลาอัปโหลดแทนเวลาถ่าย คืน null ถ้าไม่พบเวลาถ่าย */
 export function timeSourceText(f) {
-  if (f.captureSource === 'camera' && f.deviceTime) return `ถ่ายผ่านแอป — เวลาเครื่อง: ${fmtDateTime(f.deviceTime)}`;
-  if (f.exif?.tzKnown) return `เวลาจาก EXIF: ${fmtDateTime(f.exif.iso)}`;
-  if (f.exif?.raw) return `เวลาจาก EXIF: ${f.exif.display} (ไม่ทราบเขตเวลา)`;
-  return `ไม่พบเวลาถ่าย | บันทึกเข้าแอป: ${fmtDateTime(f.savedAt)}`;
+  if (f.captureSource === 'camera' && f.deviceTime) return `ถ่ายผ่านแอป · ${fmtDateTime(f.deviceTime)}`;
+  if (f.exif?.tzKnown) return `เวลาถ่าย (EXIF) · ${fmtDateTime(f.exif.iso)}`;
+  if (f.exif?.raw) return `เวลาถ่าย (EXIF) · ${f.exif.display} (ไม่ทราบเขตเวลา)`;
+  return null;
 }
+/** ข้อความใต้ภาพ */
+export function timeNote(f) { return timeSourceText(f) || 'ไม่พบเวลาถ่าย'; }
 
 /** บันทึกไฟล์ต้นฉบับลงฐานข้อมูล (ไม่แก้ไขต้นฉบับ) — กันซ้ำด้วย sha256 ภายในร้าน/ประเภทเดียวกัน */
 export async function saveOriginal(file, { roundId, rsId = null, kind, captureSource }) {
@@ -99,36 +101,43 @@ function fitFont(ctx, text, maxW, size, weight = 600) {
 }
 
 /**
- * สร้างภาพอนุพันธ์ (ไม่เขียนทับต้นฉบับ)
- *  - field: ลายน้ำแถบบนภาพ เลขร้าน + ชื่อร้าน + แหล่งที่มาของเวลา
+ * สร้างภาพอนุพันธ์จากต้นฉบับเสมอ (ไม่ประทับซ้ำบนภาพที่มีลายน้ำแล้ว และไม่แก้ต้นฉบับ)
+ *  - field: แถบเลขร้านคาดด้านบนภาพ + (ถ้าเลือก) วันที่เวลามุมล่างซ้าย เฉพาะภาพที่รู้เวลาถ่าย
  *  - barcode/bill: ต่อแถบขาวด้านบน (ไม่ทับรหัส ตัวเลข หรือลายเซ็น)
  */
-export async function makeDerived(orig, { storeCode, storeName }) {
+export async function makeDerived(orig, { storeCode, storeName, showTime = false }) {
   try { await document.fonts.load('600 24px "IBM Plex Sans Thai"'); await document.fonts.load('400 24px "IBM Plex Sans Thai"'); } catch {}
   const bmp = await loadBitmap(orig.blob);
   const maxSide = orig.kind === 'field' ? 2560 : 3200;
   const sc = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
   const W = Math.round(bmp.width * sc), H = Math.round(bmp.height * sc);
-  const timeText = timeSourceText(orig);
+  const tText = timeSourceText(orig);
   const minDim = Math.min(W, H);
   const line1 = `ร้าน ${storeCode} · ${storeName}`;
-  let canvas;
+  let canvas, stampedTime = null;
   if (orig.kind === 'field') {
     canvas = new OffscreenCanvas(W, H);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(bmp, 0, 0, W, H);
-    const band = Math.round(minDim * 0.13);
-    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, band);
+    // แถบเลขร้านคาดด้านบน
+    const band = Math.round(minDim * 0.11);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, band);
     ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle';
-    const s1 = fitFont(ctx, line1, W * 0.94, Math.round(band * 0.42));
-    ctx.fillText(line1, W * 0.03, band * 0.36);
-    const s2 = fitFont(ctx, timeText, W * 0.94, Math.round(band * 0.24), 400);
-    ctx.fillText(timeText, W * 0.03, band * 0.36 + s1 * 0.5 + s2 * 0.8);
-    // เลขร้านคาดมุมล่างขวาจาง ๆ
-    ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = '#fff';
-    const s3 = Math.round(minDim * 0.07); ctx.font = `700 ${s3}px "IBM Plex Sans Thai", sans-serif`;
-    ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.lineWidth = Math.max(2, s3 / 14); ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-    ctx.strokeText(storeCode, W * 0.97, H * 0.97); ctx.fillText(storeCode, W * 0.97, H * 0.97); ctx.restore();
+    const code = `ร้าน ${storeCode}`;
+    const s1 = fitFont(ctx, code, W * 0.6, Math.round(band * 0.56), 700);
+    ctx.fillText(code, W * 0.03, band * 0.5);
+    const cw = ctx.measureText(code).width;
+    fitFont(ctx, storeName, Math.max(40, W * 0.94 - cw - W * 0.03), Math.round(s1 * 0.6), 400);
+    ctx.fillText(storeName, W * 0.03 + cw + W * 0.025, band * 0.52);
+    // วันที่เวลา (ถ้าเลือก และรู้เวลาถ่ายจริง)
+    if (showTime && tText) {
+      stampedTime = tText;
+      const fs = Math.round(minDim * 0.032); ctx.font = `600 ${fs}px "IBM Plex Sans Thai", sans-serif`;
+      const tw = ctx.measureText(tText).width; const pad = fs * 0.45;
+      const x = W * 0.025, y = H - W * 0.025 - fs - pad * 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(x, y, tw + pad * 2, fs + pad * 2);
+      ctx.fillStyle = '#fff'; ctx.textBaseline = 'top'; ctx.fillText(tText, x + pad, y + pad);
+    }
   } else {
     const band = Math.round(Math.max(60, minDim * 0.08));
     canvas = new OffscreenCanvas(W, H + band);
@@ -138,10 +147,10 @@ export async function makeDerived(orig, { storeCode, storeName }) {
     ctx.drawImage(bmp, 0, band, W, H);
     ctx.fillStyle = '#111'; ctx.textBaseline = 'middle';
     const kindTh = orig.kind === 'bill' ? 'บิล' : 'Barcode';
-    const s1 = fitFont(ctx, `${kindTh} · ${line1}`, W * 0.95, Math.round(band * 0.38));
-    ctx.fillText(`${kindTh} · ${line1}`, W * 0.02, band * 0.32);
-    ctx.fillStyle = '#555'; const s2 = fitFont(ctx, timeText, W * 0.95, Math.round(band * 0.24), 400);
-    ctx.fillText(timeText, W * 0.02, band * 0.32 + s1 * 0.5 + s2 * 0.75);
+    const label = `${kindTh} · ${line1}`;
+    fitFont(ctx, label, W * 0.95, Math.round(band * (tText ? 0.38 : 0.5)));
+    ctx.fillText(label, W * 0.02, tText ? band * 0.32 : band * 0.48);
+    if (tText) { ctx.fillStyle = '#555'; fitFont(ctx, tText, W * 0.95, Math.round(band * 0.24), 400); ctx.fillText(tText, W * 0.02, band * 0.72); }
   }
   bmp.close?.();
   const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
@@ -150,8 +159,18 @@ export async function makeDerived(orig, { storeCode, storeName }) {
   return db.insert('files', {
     roundId: orig.roundId, rsId: orig.rsId, kind: orig.kind, role: 'derived', parentId: orig.id,
     blob, mime: 'image/jpeg', size: blob.size, name: `${orig.kind}-${storeCode}-${uid().slice(0, 6)}.jpg`,
-    storeCodeStamped: storeCode, timeText, savedAt: nowIso(), width: canvas.width, height: canvas.height, syncState: 'local',
+    storeCodeStamped: storeCode, showTime: orig.kind === 'field' ? !!showTime : null, timeText: stampedTime ?? (orig.kind === 'field' ? null : tText),
+    v: 2, savedAt: nowIso(), width: canvas.width, height: canvas.height, syncState: 'local',
   });
+}
+
+/** ภาพอนุพันธ์ที่ตรงกับร้านและตัวเลือกปัจจุบัน — ถ้าไม่ตรง (เช่น ข้อมูลรุ่นเก่า) สร้างใหม่จากต้นฉบับ */
+export async function ensureDerived(orig, rs) {
+  const ds = await db.derivedOf(orig.id);
+  const d = ds.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const showTime = !!rs.fieldShowTime;
+  const ok = d && d.v === 2 && d.storeCodeStamped === rs.storeCodeSnap && (orig.kind !== 'field' || d.showTime === showTime);
+  return ok ? d : makeDerived(orig, { storeCode: rs.storeCodeSnap, storeName: rs.storeNameSnap, showTime });
 }
 
 export function blobUrl(blob) { return URL.createObjectURL(blob); }
