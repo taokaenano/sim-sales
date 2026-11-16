@@ -1,11 +1,8 @@
 // ===== สร้างรายงาน PDF (pdf-lib + ฟอนต์ IBM Plex Sans Thai ฝังในไฟล์) =====
 // วาดข้อความไทยแบบจัดตำแหน่งสระ/วรรณยุกต์เองตามข้อมูล GPOS ของฟอนต์ (pdf-lib วาดเองไม่ถูก)
 import * as db from './db.js';
-import { fmtDate, fmtDateTime, fmtSatang, nowIso } from './util.js';
-import { CHECK_TEXT, RELATION_TEXT } from './barcode.js';
+import { fmtDate, fmtDateTime, nowIso } from './util.js';
 import { loadBitmap } from './image.js';
-import { TEMPLATE, STATE_TEXT, ITEM_TYPES } from './bill.js';
-import { OUTCOME_TEXT, REVIEW_TEXT } from './logic.js';
 
 const { PDFDocument, PDFHexString, rgb, pushGraphicsState, popGraphicsState, beginText, endText, setFontAndSize, setTextMatrix, showText, setFillingRgbColor, degrees } = window.PDFLib;
 const A4 = [595.28, 841.89]; const M = 36;
@@ -92,11 +89,11 @@ class Writer {
     }
     this.y -= 8;
   }
-  async image(blob, { maxH = 520, caption = '' } = {}) {
+  async image(blob, { maxH = 520, caption = '', maxSide = 2000, quality = 0.88 } = {}) {
     const bmp = await loadBitmap(blob);
-    const maxSide = 2000; const sc = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+    const sc = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
     const c = new OffscreenCanvas(Math.round(bmp.width * sc), Math.round(bmp.height * sc)); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close?.();
-    const jpg = await (await c.convertToBlob({ type: 'image/jpeg', quality: 0.88 })).arrayBuffer();
+    const jpg = await (await c.convertToBlob({ type: 'image/jpeg', quality })).arrayBuffer();
     const img = await this.doc.embedJpg(jpg);
     const maxW = A4[0] - 2 * M; const k = Math.min(maxW / img.width, maxH / img.height);
     const w = img.width * k, h = img.height * k;
@@ -105,28 +102,32 @@ class Writer {
     this.y -= h + 4;
     if (caption) { this.text(caption, M, this.y - 9, { size: 8, color: GREY }); this.y -= 14; }
   }
-  footer(code, version, created) {
+  footer(created, draft) {
     const pages = this.doc.getPages(); const n = pages.length;
     pages.forEach((p, i) => {
       const sc = this.pageStore.get(p);
-      const t = `รายงาน ${code} · เวอร์ชัน ${version} · สร้าง ${fmtDateTime(created)}${sc ? ' · ร้าน ' + sc : ''}`;
+      const t = `${sc ? sc + ' · ' : ''}${draft ? 'ฉบับร่าง · ' : ''}สร้าง ${fmtDateTime(created)}`;
       this.text(t, M, 18, { size: 7.5, color: GREY, page: p });
       const pn = `หน้า ${i + 1}/${n}`; this.text(pn, A4[0] - M - this.width(pn, 7.5), 18, { size: 7.5, color: GREY, page: p });
     });
   }
 }
 
-const DELIV = { allocated: 'จัดให้ร้าน', delivered: 'ส่งจริง', returned: 'ไม่ได้ส่ง/คืน' };
 
-export async function buildPdf(snap, { reportCode, version, createdAt = nowIso(), createdBy = '' }) {
+/**
+ * PDF V2 — ค่าเริ่มต้นมีเฉพาะภาพหลักฐาน:
+ *   ใบเบิกต้นฉบับครบทุกหน้า → [หน้าสรุป ถ้าเลือก] → ร้านที่ 1: Barcode → บิล → รูปลงพื้นที่ → ร้านถัดไป
+ * ไม่สร้างตาราง Barcode/OCR/ยอดเงิน และไม่เพิ่มหน้าปกหรือหน้าแบ่งร้าน
+ */
+export async function buildPdf(snap, { includeSummary = false, createdAt = nowIso(), createdBy = '' } = {}) {
   const doc = await PDFDocument.create(); doc.registerFontkit(window.fontkit);
   const fb = await fonts();
   const fr = await doc.embedFont(fb.r, { subset: false }); const fbold = await doc.embedFont(fb.b, { subset: false });
-  const isDraft = !snap.complete || snap.stores.some(s => s.bill && !s.bill.confirmed);
+  const isDraft = !snap.complete;
   const W = new Writer(doc, fr, fbold, { isDraft });
-  doc.setTitle(`รายงานส่งซิม ${snap.round.code}`); doc.setCreator('SIM Evidence (demo)'); doc.setProducer('pdf-lib');
+  doc.setTitle(`หลักฐานส่งซิม ${snap.round.code}`); doc.setCreator('SIM Sales V2'); doc.setProducer('pdf-lib');
 
-  // 1) ใบเบิกต้นฉบับครบทุกหน้า (อยู่ต้นไฟล์เสมอ)
+  // 1) ใบเบิกต้นฉบับครบทุกหน้า
   for (const fid of snap.requisition.fileIds) {
     const f = await db.get('files', fid);
     if (f.mime === 'application/pdf') {
@@ -134,84 +135,55 @@ export async function buildPdf(snap, { reportCode, version, createdAt = nowIso()
       const pages = await doc.copyPages(src, src.getPageIndices());
       for (const p of pages) { doc.addPage(p); W.page = p; W.drawDraftMark(); }
     } else {
-      W.newPage(); W.heading('ใบเบิกสินค้า (ต้นฉบับ)', 12); await W.image(f.blob, { maxH: A4[1] - 2 * M - 50, caption: `ไฟล์: ${f.name}` });
+      W.newPage(); await W.image(f.blob, { maxH: W.y - (M + 24) - 12, maxSide: 2800, quality: 0.9 });
     }
   }
-  if (!snap.requisition.fileIds.length) { W.newPage(); W.heading('ใบเบิกสินค้า'); W.para('ไม่มีไฟล์ใบเบิกในรอบงานนี้', { color: RED, bold: true }); }
 
-  // 2) สรุปรอบงาน
-  W.newPage(); W.curStore = null;
-  W.text('รายงานหลักฐานการส่งซิมให้ร้านค้า', M, W.y - 18, { size: 18, bold: true }); W.y -= 30;
-  W.kv([['รหัสรอบงาน', snap.round.code], ['วันที่', fmtDate(snap.round.workDate)], ['ผู้รับผิดชอบ', snap.round.owner], ['ขอบเขต', snap.scope === 'round' ? 'ทั้งรอบงาน' : `เฉพาะร้าน ${snap.stores.map(s => s.code).join(', ')}`],
-    ['รหัสรายงาน / เวอร์ชัน', `${reportCode} / v${version}`], ['สร้างเมื่อ / โดย', `${fmtDateTime(createdAt)} / ${createdBy || '-'}`], ['สถานะรายงาน', isDraft ? 'ฉบับร่าง / หลักฐานไม่ครบ' : 'หลักฐานครบ'], ['สถานะรอบงาน', snap.round.status === 'closed' ? `ปิดแล้ว ${fmtDateTime(snap.round.closedAt)}` : 'ยังไม่ปิด']]);
-  if (snap.requisition.lines.length) {
-    W.heading('ยอดเบิกที่กรอกด้วยมือ', 11);
-    W.para('หมายเหตุ: ยอดนี้กรอกด้วยมือจากใบเบิก ระบบยังไม่ได้กระทบยอดกับไฟล์ใบเบิกอัตโนมัติ', { size: 8, color: GREY });
-    const allocBy = {}; for (const s of snap.stores) for (const x of s.sims) allocBy[x.partNo || '-'] = (allocBy[x.partNo || '-'] || 0) + 1;
-    W.table([{ t: 'สินค้า', w: 0.4 }, { t: 'Part code', w: 0.2 }, { t: 'จำนวนเบิก', w: 0.2 }, { t: 'ซิมที่จัดให้ร้านในรายงานนี้', w: 0.2 }],
-      snap.requisition.lines.map(l => [l.productName, l.partCode, l.qtyRequisition ?? 'ไม่มีข้อมูล', l.partCode ? String(allocBy[l.partCode] || 0) : '-']));
+  // 2) หน้าสรุป (เฉพาะเมื่อเลือก) — ใช้เฉพาะข้อมูลที่มีจริง
+  if (includeSummary) {
+    W.newPage(); W.curStore = null;
+    W.text('สรุปข้อมูล', M, W.y - 18, { size: 18, bold: true }); W.y -= 30;
+    W.kv([['รอบงาน', snap.round.code], ['วันที่', fmtDate(snap.round.workDate)], ['ผู้รับผิดชอบ', snap.round.owner], ['สร้างเมื่อ', `${fmtDateTime(createdAt)}${createdBy ? ' · ' + createdBy : ''}`]], 2);
+    W.table([{ t: '#', w: 0.06 }, { t: 'ร้าน', w: 0.32 }, { t: 'สถานะ', w: 0.18 }, { t: 'ซิม', w: 0.08 }, { t: 'Barcode', w: 0.09 }, { t: 'บิล', w: 0.07 }, { t: 'ติ๊กยืนยัน', w: 0.11 }, { t: 'รูป', w: 0.09 }],
+      snap.stores.map(s => [String(s.seq), `${s.code} ${s.name}`, s.statusText, String(s.simCount), String(s.counts.barcode), String(s.counts.bill), s.billChecked ? '✓' : '-', String(s.counts.field)]));
+    const miss = [...(snap.missingRequisition ? ['ใบเบิก'] : []), ...snap.stores.filter(s => s.missing.length).map(s => `${s.code}: ${s.missing.join(', ')}`)];
+    if (miss.length) { W.heading('ยังขาด', 11); W.para(miss.map(m => '• ' + m).join('\n'), { size: 9 }); }
   }
-  W.heading('สรุปรายร้าน', 11);
-  W.table([{ t: '#', w: 0.05 }, { t: 'ร้าน', w: 0.25 }, { t: 'สถานะ', w: 0.18 }, { t: 'เตรียม', w: 0.08 }, { t: 'ส่งจริง', w: 0.08 }, { t: 'ตามบิล*', w: 0.08 }, { t: 'ต่าง', w: 0.07 }, { t: 'ยอดเงินตามบิล*', w: 0.11 }, { t: 'ข้อยกเว้น', w: 0.10 }],
-    snap.stores.map(s => {
-      const c = s.bill?.confirmed; const r = [String(s.seq), `${s.code} ${s.name}`, s.statusText, String(s.preparedCount), s.deliveredCount ?? '-', c ? String(s.bill.simQty) : 'ยังไม่ยืนยัน', c ? String(s.bill.simQty - s.preparedCount) : '-', c ? fmtSatang(s.bill.lineAmount) : '-', String(s.exceptions.length)];
-      r.colors = [null, null, s.status === 'needs_fix' ? RED : null, null, null, c ? null : GREY, c && s.bill.simQty !== s.preparedCount ? RED : null, null, s.exceptions.length ? RED : null]; return r;
-    }));
-  W.para('* นับเฉพาะบิลที่ผู้ใช้ยืนยันแล้ว — บิลฉบับร่างไม่รวมเป็นยอดยืนยัน · ยอดเงินคือจำนวนเงินที่ระบุในบิล ไม่ใช่ยืนยันว่ารับเงินแล้ว', { size: 7.5, color: GREY });
-  const missing = snap.stores.filter(s => s.status !== 'submitted' && s.status !== 'other').flatMap(s => s.checks.filter(c => !c.ok).map(c => `${s.code}: ${c.label}`));
-  const exAll = snap.stores.flatMap(s => s.exceptions.map(e => `${s.code}: ${e.text}${e.reason ? ' — เหตุผล: ' + e.reason : ' — ยังไม่ระบุเหตุผล'}`));
-  if (missing.length) { W.heading('รายการที่ยังขาด', 11); W.para(missing.map(m => '• ' + m).join('\n'), { size: 8.5, color: RED }); }
-  if (exAll.length) { W.heading('ข้อยกเว้น', 11); W.para(exAll.map(m => '• ' + m).join('\n'), { size: 8.5 }); }
 
-  // 3) หลักฐานแต่ละร้าน
+  // 3) หลักฐานรายร้าน ตามลำดับในรอบงาน
   for (const s of snap.stores) {
-    W.curStore = s.code; W.newPage(s.code);
-    W.rect(M, W.y - 30, A4[0] - 2 * M, 30, RED);
-    W.text(`ร้าน ${s.code} · ${s.name}`, M + 8, W.y - 20, { size: 13, bold: true, color: [1, 1, 1] }); W.y -= 40;
-    W.kv([['สถานะ', s.statusText], ['ลำดับ', String(s.seq)], ['จำนวนจัดให้ร้าน (เตรียม)', String(s.preparedCount)], ['ส่งจริง (เลือกตาม S/N)', s.deliveredCount == null ? 'ยังไม่ยืนยัน' : String(s.deliveredCount)],
-      ['จำนวนตามบิล', s.bill?.confirmed ? `${s.bill.simQty} (ขาย ${s.bill.paidQty} / แถม ${s.bill.freeQty})` : (s.bill ? 'บิลยังไม่ยืนยัน' : 'ไม่มีบิล')], ['ส่วนต่าง บิล − เตรียม', s.bill?.confirmed ? String(s.bill.simQty - s.preparedCount) : '-'],
-      ['ยอดเงินตามบิล (รวมรายการ)', s.bill?.confirmed ? fmtSatang(s.bill.lineAmount) + ' บาท' : '-'], ['ยอดรับเงินทั้งสิ้นตามบิล', s.bill?.confirmed && s.bill.received != null ? fmtSatang(s.bill.received) + ' บาท' : '-'],
-      ['ลายเซ็นผู้รับ', s.bill?.signatureText || '-'], ['ส่งหลักฐานเมื่อ', s.submittedAt ? `${fmtDateTime(s.submittedAt)} โดย ${s.submittedBy}` : 'ยังไม่ส่ง']]);
-    if (s.outcome && s.outcome !== 'delivered') W.para(`ผลการเข้าร้าน: ${OUTCOME_TEXT[s.outcome]} — ${s.outcomeReason || ''}`, { bold: true, color: RED });
-    if (s.exceptions.length) { W.heading('ข้อยกเว้น', 10); W.para(s.exceptions.map(e => `• ${e.text}${e.reason ? ' — เหตุผล: ' + e.reason : ' — ยังไม่ระบุเหตุผล'}`).join('\n'), { size: 8.5 }); }
-    if (s.review) W.para(`ส่วนกลาง: ${REVIEW_TEXT[s.review.status] || s.review.status} โดย ${s.review.by} ${fmtDateTime(s.review.at)} ${s.review.note || ''}`, { size: 8.5, color: GREY });
-    if (s.bill) {
-      W.heading('รายการตามบิล', 10);
-      const rows = [];
-      for (const r of TEMPLATE.rows) {
-        const row = s.bill.rows[r.key]; if (!row) continue;
-        const show = c => c.state === 'value' ? c.value : (STATE_TEXT[c.state] || 'ยังไม่ตรวจ');
-        if (row.qty.state === 'blank' && row.amount.state === 'blank' && !row.item.type) continue;
-        rows.push([r.label, ITEM_TYPES.find(t => t[0] === row.item.type)?.[1] || '-', show(row.qty), show(row.price), show(row.amount), `${row.qty.read || '-'} / ${row.amount.read || '-'}`]);
+    W.curStore = `ร้าน ${s.code} · ${s.name}`;
+    const label = () => { W.text(W.curStore, M, W.y - 10, { size: 9, bold: true, color: RED }); W.y -= 18; };
+    const seq = [...s.images.barcode.map(id => ['barcode', id]), ...s.images.bill.map(id => ['bill', id]), ...s.images.field.map(id => ['field', id])];
+    const avail = () => W.y - (M + 24) - 12; // พื้นที่ที่เหลือจริงบนหน้า (หักแถบฉบับร่าง/หัวร้าน/ท้ายหน้าแล้ว)
+    let fieldOnPage = 0, half = 0;
+    for (const [kind, id] of seq) {
+      const f = await db.get('files', id);
+      if (kind === 'field') {
+        // รูปลงพื้นที่: ไม่เกิน 2 รูปต่อหน้า
+        if (fieldOnPage === 0 || fieldOnPage >= 2) { W.newPage(W.curStore); label(); fieldOnPage = 0; half = avail() / 2 - 6; }
+        await W.image(f.blob, { maxH: half, maxSide: 2000, quality: 0.88 }); fieldOnPage++;
+      } else {
+        // Barcode/บิล: หน้าละ 1 ภาพ เต็มหน้า เพื่อให้อ่านรหัสและตัวเลขได้
+        W.newPage(W.curStore); label(); fieldOnPage = 0;
+        await W.image(f.blob, { maxH: avail(), maxSide: 3000, quality: 0.92 });
       }
-      for (const t of TEMPLATE.totals) { const c = s.bill.totals[t.key]; if (c && c.state !== 'blank') rows.push([t.label, '', '', '', c.state === 'value' ? c.value : (STATE_TEXT[c.state] || 'ยังไม่ตรวจ'), c.read || '-']); }
-      W.table([{ t: 'แถวในบิล', w: 0.18 }, { t: 'ประเภท', w: 0.16 }, { t: 'จำนวน', w: 0.12 }, { t: 'ราคา', w: 0.12 }, { t: 'เงินรวม', w: 0.16 }, { t: 'ค่าที่ระบบอ่านครั้งแรก (จำนวน/เงิน)', w: 0.26 }], rows);
-      if (s.bill.checks.length) W.para('ผลตรวจความสอดคล้อง: ' + s.bill.checks.map(c => c.text).join(' / '), { size: 8.5, color: RED });
-      if (!s.bill.confirmed) W.para('บิลนี้ยังเป็นฉบับร่าง — ตัวเลขยังไม่ถูกนับเป็นยอดยืนยัน', { size: 9, bold: true, color: RED });
     }
-    W.heading(`รายการซิม (${s.sims.length})`, 10);
-    W.table([{ t: '#', w: 0.05 }, { t: 'S/N (Barcode)', w: 0.27 }, { t: 'เบอร์', w: 0.13 }, { t: 'Part no.', w: 0.12 }, { t: 'ผลตรวจ', w: 0.17 }, { t: 'ยืนยัน', w: 0.08 }, { t: 'ส่ง', w: 0.1 }, { t: 'ซ้ำ', w: 0.08 }],
-      s.sims.map((x, i) => { const r = [String(i + 1), x.serial || '-', x.msisdn || '-', x.partNo || '-', CHECK_TEXT[x.check] || '-', x.confirmed ? '✓' : 'ยัง', DELIV[x.delivery] || '-', x.dupNote || '-']; r.colors = [null, null, null, null, x.check === 'mismatch' ? RED : null, x.confirmed ? null : RED, null, x.dupNote ? RED : null]; return r; }));
-    W.para(`ความสัมพันธ์ Barcode กับ S/N ตามกฎธุรกิจ: ${RELATION_TEXT}`, { size: 7.5, color: GREY });
-    for (const id of s.images.barcode) { const f = await db.get('files', id); await W.image(f.blob, { maxH: 560, caption: `ภาพ Barcode · ${f.timeText || ''}` }); }
-    for (const id of s.images.bill) { const f = await db.get('files', id); await W.image(f.blob, { maxH: 600, caption: `ภาพบิล · ${f.timeText || ''} · ลายเซ็น: ${s.bill?.signatureText || '-'}` }); }
-    for (const id of s.images.field) { const f = await db.get('files', id); await W.image(f.blob, { maxH: 380, caption: `รูปลงพื้นที่ · ${f.timeText || ''}` }); }
-    if (s.notes) { W.heading('หมายเหตุ', 10); W.para(s.notes, { size: 9 }); }
+    if (!seq.length) { W.newPage(W.curStore); label(); W.para('ยังไม่มีภาพหลักฐานของร้านนี้', { color: GREY }); }
   }
-  W.footer(reportCode, version, createdAt);
+  if (!doc.getPageCount()) { W.newPage(); W.para('ยังไม่มีเอกสาร', { color: GREY }); }
+  W.footer(createdAt, isDraft);
   return { bytes: await doc.save(), isDraft };
 }
 
-/** สร้างรายงานเวอร์ชันใหม่ เก็บไว้ (ไม่เขียนทับฉบับเก่า) */
-export async function createReport(snap, user) {
-  const existing = (await db.byIndex('reports', 'roundId', snap.round.id)).filter(r => r.scope === snap.scope && (r.rsKey || '') === (snap.scope === 'store' ? snap.stores.map(s => s.rsId).join(',') : ''));
-  const version = existing.length + 1;
-  const reportCode = `RPT-${snap.round.code}${snap.scope === 'store' ? '-' + snap.stores.map(s => s.code).join('_') : ''}`;
+/** สร้างไฟล์ PDF แล้วเก็บไว้ (Preview และดาวน์โหลดใช้ไฟล์เดียวกันนี้) */
+export async function createReport(snap, user, { includeSummary = false } = {}) {
   const createdAt = nowIso();
-  const { bytes, isDraft } = await buildPdf(snap, { reportCode, version, createdAt, createdBy: user.name });
+  const { bytes, isDraft } = await buildPdf(snap, { includeSummary, createdAt, createdBy: user.name });
   const blob = new Blob([bytes], { type: 'application/pdf' });
-  const f = await db.insert('files', { roundId: snap.round.id, rsId: null, kind: 'report', role: 'original', blob, mime: 'application/pdf', size: blob.size, name: `${reportCode}-v${version}${isDraft ? '-ร่าง' : ''}.pdf`, savedAt: createdAt });
-  const rep = await db.insert('reports', { roundId: snap.round.id, scope: snap.scope, rsKey: snap.scope === 'store' ? snap.stores.map(s => s.rsId).join(',') : '', code: reportCode, version, isDraft, createdAt, createdBy: user.name, snapshotHash: snap.hash, fileId: f.id });
-  await db.audit({ entity: 'report', entityId: rep.id, roundId: snap.round.id, action: 'create', after: { code: reportCode, version, isDraft } });
-  return { report: rep, file: f };
+  const scope = snap.scope === 'store' ? '-' + snap.stores.map(s => s.code).join('_') : '';
+  const name = `${snap.round.code}${scope}${isDraft ? '-ร่าง' : ''}${includeSummary ? '-สรุป' : ''}.pdf`;
+  const f = await db.insert('files', { roundId: snap.round.id, rsId: null, kind: 'report', role: 'original', blob, mime: 'application/pdf', size: blob.size, name, savedAt: createdAt, includeSummary, isDraft });
+  await db.audit({ entity: 'report', entityId: f.id, roundId: snap.round.id, action: 'create', after: { name, isDraft, includeSummary } });
+  return { file: f };
 }
