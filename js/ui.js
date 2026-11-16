@@ -69,10 +69,16 @@ export function pickFiles({ accept = 'image/*', multiple = true, capture = false
   return new Promise(res => {
     let done = false;
     const finish = f => { if (done) return; done = true; i.onchange = null; i.oncancel = null; res(f); };
-    i.onchange = () => {
-      const f = [...(i.files || [])];
-      if (f.length && /image/.test(accept)) toast(f.length > 1 ? `กำลังบันทึกภาพ ${f.length} ภาพ…` : 'กำลังบันทึกภาพ…');
-      finish(f);
+    i.onchange = async () => {
+      const picked = [...(i.files || [])];
+      if (picked.length && /image/.test(accept)) toast(picked.length > 1 ? `กำลังบันทึกภาพ ${picked.length} ภาพ…` : 'กำลังบันทึกภาพ…');
+      // อ่านไฟล์เข้าหน่วยความจำทันที — ไฟล์จากกล้อง iPhone อาจเปิดไม่ได้อีกเมื่อเวลาผ่านไป
+      const out = [];
+      for (const f of picked) {
+        try { const b = await f.arrayBuffer(); out.push(new File([b], f.name || 'image.jpg', { type: f.type || 'image/jpeg', lastModified: f.lastModified || Date.now() })); }
+        catch { toast(`อ่านไฟล์ ${f.name || ''} ไม่ได้ — ลองถ่ายใหม่`, true); }
+      }
+      finish(out);
     };
     i.oncancel = () => finish([]);
     i.click();
