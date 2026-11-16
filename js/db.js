@@ -40,10 +40,31 @@ export function openDb() {
 function reqP(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
 function txDone(tx) { return new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('ยกเลิกธุรกรรม')); }); }
 
-export async function get(store, id) { const db = await openDb(); return reqP(db.transaction(store).objectStore(store).get(id)); }
-export async function all(store) { const db = await openDb(); return reqP(db.transaction(store).objectStore(store).getAll()); }
+// ===== เก็บไฟล์เป็นไบต์ (ArrayBuffer) ไม่ใช่ Blob =====
+// Safari บน iPhone มีปัญหา Blob ที่เก็บใน IndexedDB เปิดไม่ได้ภายหลัง จึงแปลงเป็นไบต์ก่อนเก็บ และแปลงกลับตอนอ่าน
+const BLOB_FIELDS = ['blob', 'cropBlob', 'warpedBlob'];
+async function pack(rec) {
+  if (!rec || typeof rec !== 'object') return rec;
+  const out = { ...rec };
+  for (const k of BLOB_FIELDS) {
+    const v = out[k];
+    if (v instanceof Blob) out[k] = { __bytes: await v.arrayBuffer(), type: v.type || 'application/octet-stream', name: v.name || null };
+  }
+  return out;
+}
+function unpack(rec) {
+  if (!rec || typeof rec !== 'object') return rec;
+  for (const k of BLOB_FIELDS) {
+    const v = rec[k];
+    if (v && v.__bytes) rec[k] = new Blob([v.__bytes], { type: v.type });
+  }
+  return rec;
+}
+
+export async function get(store, id) { const db = await openDb(); return unpack(await reqP(db.transaction(store).objectStore(store).get(id))); }
+export async function all(store) { const db = await openDb(); return (await reqP(db.transaction(store).objectStore(store).getAll())).map(unpack); }
 export async function byIndex(store, index, value) {
-  const db = await openDb(); return reqP(db.transaction(store).objectStore(store).index(index).getAll(value));
+  const db = await openDb(); return (await reqP(db.transaction(store).objectStore(store).index(index).getAll(value))).map(unpack);
 }
 
 export class ConflictError extends Error {
@@ -54,8 +75,9 @@ export class ConflictError extends Error {
 export async function insert(store, obj) {
   const db = await openDb();
   const rec = { createdAt: nowIso(), updatedAt: nowIso(), version: 1, ...obj, id: obj.id || uid() };
+  const packed = await pack(rec);
   const tx = db.transaction(store, 'readwrite');
-  tx.objectStore(store).add(rec);
+  tx.objectStore(store).add(packed);
   await txDone(tx);
   return rec;
 }
@@ -63,21 +85,31 @@ export async function insert(store, obj) {
 /** แก้ไขแบบตรวจเวอร์ชัน: ถ้าเวอร์ชันในฐานข้อมูลไม่ตรงกับที่ถืออยู่ จะไม่เขียนทับ */
 export async function update(store, id, expectedVersion, patchFn) {
   const db = await openDb();
-  const tx = db.transaction(store, 'readwrite');
-  const os = tx.objectStore(store);
-  const cur = await reqP(os.get(id));
-  if (!cur) { tx.abort(); throw new Error('ไม่พบข้อมูล'); }
-  if (expectedVersion != null && cur.version !== expectedVersion) { tx.abort(); throw new ConflictError(cur); }
-  const next = typeof patchFn === 'function' ? patchFn(structuredClone(cur)) : { ...cur, ...patchFn };
+  const cur = unpack(await reqP(db.transaction(store).objectStore(store).get(id)));
+  if (!cur) throw new Error('ไม่พบข้อมูล');
+  if (expectedVersion != null && cur.version !== expectedVersion) throw new ConflictError(cur);
+  const next = typeof patchFn === 'function' ? patchFn({ ...structuredCloneSafe(cur) }) : { ...cur, ...patchFn };
   next.version = cur.version + 1; next.updatedAt = nowIso();
-  os.put(next);
+  const packed = await pack(next);
+  // เขียนเฉพาะเมื่อเวอร์ชันยังไม่ถูกเปลี่ยนระหว่างเตรียมข้อมูล
+  const tx = db.transaction(store, 'readwrite'); const os = tx.objectStore(store);
+  const again = await reqP(os.get(id));
+  if (!again || again.version !== cur.version) { tx.abort(); throw new ConflictError(unpack(again)); }
+  os.put(packed);
   await txDone(tx);
   return next;
 }
 
+/** clone ที่คง Blob ไว้ (ไม่ copy ไบต์) */
+function structuredCloneSafe(v) {
+  if (v instanceof Blob || v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(structuredCloneSafe);
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, structuredCloneSafe(x)]));
+}
+
 export async function put(store, obj) {
-  const db = await openDb(); const tx = db.transaction(store, 'readwrite');
-  tx.objectStore(store).put(obj); await txDone(tx); return obj;
+  const db = await openDb(); const packed = await pack(obj); const tx = db.transaction(store, 'readwrite');
+  tx.objectStore(store).put(packed); await txDone(tx); return obj;
 }
 
 export async function del(store, id) {
@@ -103,7 +135,7 @@ export function normalizeStoreCode(code) { return String(code ?? '').trim(); }
 
 export async function findStoreByCode(code) {
   const db = await openDb();
-  return reqP(db.transaction('stores').objectStore('stores').index('code').get(normalizeStoreCode(code)));
+  return unpack(await reqP(db.transaction('stores').objectStore('stores').index('code').get(normalizeStoreCode(code))));
 }
 
 export async function addStore({ code, name, area = '', note = '' }) {
