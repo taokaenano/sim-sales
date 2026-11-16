@@ -1,4 +1,5 @@
 // ===== แอปหลัก: เส้นทาง + หน้ารอบงาน / ร้านค้า / ส่วนกลาง / Export =====
+import './compat.js';
 import * as db from './db.js';
 import { esc, fmtDate, fmtDateTime, todayYmd, download, nowIso, parseIntStrict } from './util.js';
 import { $, $$, toast, guard, modal, confirmBox, blobSrc, pickFiles, badgeFor, errMsg, nav, onRoute, currentRoute } from './ui.js';
