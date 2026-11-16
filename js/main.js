@@ -2,10 +2,10 @@
 import './compat.js';
 import * as db from './db.js';
 import { esc, fmtDate, fmtDateTime, todayYmd, download, nowIso, parseIntStrict } from './util.js';
-import { $, $$, toast, guard, modal, confirmBox, blobSrc, pickFiles, badgeFor, errMsg, nav, onRoute, currentRoute } from './ui.js';
+import { $, $$, toast, guard, modal, confirmBox, blobSrc, pickFiles, errMsg, nav, onRoute, currentRoute, zoomImage } from './ui.js';
 import { checkImageFile, saveOriginal } from './image.js';
-import { evaluate, loadStoreData, buildSnapshot, isClosedResult, OUTCOME_TEXT, REVIEW_TEXT } from './logic.js';
-import { simsCsv, billsCsv } from './csv.js';
+import { evaluate, loadStoreData, buildSnapshot, statusBadge } from './logic.js';
+import { simsCsv, storesCsv } from './csv.js';
 import { renderStore } from './store.js';
 
 const app = document.getElementById('app');
@@ -42,8 +42,8 @@ async function route() {
     if (!USER.name) { app.innerHTML = '<div class="card"><h2>เริ่มใช้งาน</h2><p class="muted">ตั้งชื่อผู้ใช้ก่อน</p><button class="btn primary big" id="setu">ตั้งชื่อผู้ใช้</button></div>'; $('#setu').onclick = askWho; return; }
     if (!p0) return await home();
     if (p0 === 'stores') return await storesPage();
-    if (p0 === 'r') return await roundPage(p1, p2 || 'prep');
-    if (p0 === 's') return await renderStore(app, p1, p2 || 'barcode', USER);
+    if (p0 === 'r') return await roundPage(p1, p2 || 'summary');
+    if (p0 === 's') return await renderStore(app, p1, p2 === 'photos' || p2 === 'field' ? 'field' : 'prep', USER); // เส้นทางรุ่นเก่า barcode/bill/review → prep
     if (p0 === 'central') return await centralPage();
     app.innerHTML = '<div class="card">ไม่พบหน้า</div>';
   } catch (e) { console.error(e); app.innerHTML = `<div class="card"><h2>เกิดข้อผิดพลาด</h2><p>${esc(errMsg(e))}</p><a class="btn" href="#/">กลับหน้าหลัก</a></div>`; }
@@ -57,10 +57,10 @@ async function home() {
   const rounds = (await db.all('rounds')).filter(r => USER.role === 'central' || r.owner === USER.name).sort((a, b) => b.workDate.localeCompare(a.workDate) || b.createdAt.localeCompare(a.createdAt));
   const rows = [];
   for (const r of rounds) {
-    const rss = await db.roundStoresOf(r.id); let done = 0, fix = 0;
-    for (const rs of rss) { const ev = evaluate(rs, await loadStoreData(rs)); if (isClosedResult(ev)) done++; if (ev.status === 'needs_fix') fix++; }
+    const rss = await db.roundStoresOf(r.id); let done = 0;
+    for (const rs of rss) { if (evaluate(rs, await loadStoreData(rs)).status === 'complete') done++; }
     rows.push(`<a class="item" href="#/r/${r.id}"><div class="grow"><div class="t mono">${esc(r.code)}</div><div class="muted">${fmtDate(r.workDate)} · ${esc(r.owner)} · ${rss.length} ร้าน</div></div>
-      <div class="right">${r.status === 'closed' ? '<span class="badge ok">ปิดรอบแล้ว</span>' : `<span class="badge">${done}/${rss.length} มีผล</span>`}${fix ? ` <span class="badge bad">แก้ไข ${fix}</span>` : ''}</div></a>`);
+      <div class="right"><span class="badge ${rss.length && done === rss.length ? 'ok' : ''}">หลักฐานครบ ${done}/${rss.length}</span></div></a>`);
   }
   const est = await db.storageEstimate();
   app.innerHTML = `
@@ -74,7 +74,7 @@ async function home() {
   $('#mk').onclick = guard(async () => {
     const owner = $('#ow').value.trim(); if (!owner) throw new Error('ต้องระบุผู้รับผิดชอบ');
     const r = await db.createRound({ workDate: $('#wd').value || todayYmd(), owner });
-    nav(`#/r/${r.id}/prep`);
+    nav(`#/r/${r.id}`);
   });
 }
 
@@ -145,95 +145,71 @@ async function storeForm(s) {
   if (r) storesPage();
 }
 
-// ---------- รอบงาน ----------
+// ---------- รอบงาน (V2) ----------
+// summary = หน้าสรุปใบเบิก · prep = รายชื่อร้านสำหรับเตรียมเอกสาร · field = รายชื่อร้านสำหรับลงพื้นที่ · export = ดูตัวอย่าง/Export
 async function roundPage(id, tab) {
   const round = await db.get('rounds', id); if (!round) throw new Error('ไม่พบรอบงาน');
   const rss = await db.roundStoresOf(id);
   const evs = new Map(); for (const rs of rss) evs.set(rs.id, evaluate(rs, await loadStoreData(rs)));
-  const closed = round.status === 'closed';
-  const head = `<div class="row between"><div><h1 class="mono" style="margin-bottom:0">${esc(round.code)}</h1><div class="muted">${fmtDate(round.workDate)} · ${esc(round.owner)} ${closed ? '· <span class="badge ok">ปิดรอบแล้ว</span>' : ''}</div></div><a class="btn sm" href="#/">กลับ</a></div>
-    <div class="tabs" style="margin-top:10px">${[['prep', 'เตรียมก่อนออกพื้นที่'], ['field', 'ลงพื้นที่'], ['export', 'สรุป / Export']].map(([k, t]) => `<a href="#/r/${id}/${k}" class="${tab === k ? 'on' : ''}">${t}</a>`).join('')}</div>`;
-  if (tab === 'export') return exportPage(round, rss, evs, head);
+  if (tab === 'export') return exportPage(round, rss, evs);
+  if (tab === 'prep' || tab === 'field') return storeListPage(round, rss, evs, tab);
+  return summaryPage(round, rss, evs);
+}
 
-  const onlyOpen = sessionStorage.getItem('onlyOpen') === '1';
-  const storeList = () => rss.filter(rs => !onlyOpen || !isClosedResult(evs.get(rs.id))).map((rs, i) => {
-    const ev = evs.get(rs.id);
-    const target = tab === 'prep' ? 'barcode' : 'bill';
-    return `<div class="item"><a class="grow" style="text-decoration:none;color:inherit" href="#/s/${rs.id}/${target}">
-      <div class="t"><span class="mono">${esc(rs.storeCodeSnap)}</span> · ${esc(rs.storeNameSnap)}</div>
-      <div class="statusline"><span class="badge ${badgeFor(ev.status)}">${esc(ev.statusText)}</span><span class="muted">ซิม ${ev.preparedCount}${ev.billConfirmed ? ` · บิล ${ev.billSum.simQty}` : ''} · รูป ${ev.counts.field}</span></div></a>
-      ${tab === 'prep' && !closed ? `<div class="row" style="flex-direction:column;gap:2px"><button class="btn sm ghost" data-up="${rs.id}" ${i === 0 ? 'disabled' : ''}>▲</button><button class="btn sm ghost" data-dn="${rs.id}" ${i === rss.length - 1 ? 'disabled' : ''}>▼</button></div>` : ''}</div>`;
-  }).join('') || '<div class="muted">ยังไม่มีร้าน</div>';
+const chip = (ok, label) => `<span class="badge ${ok ? 'ok' : ''}">${ok ? '✓ ' : ''}${label}</span>`;
 
-  let body = '';
-  if (tab === 'prep') {
-    const reqFiles = (await db.roundFiles(id, 'requisition')).filter(f => f.role === 'original');
-    const lines = round.requisition?.lines || [];
-    body = `<div class="card"><div class="row between"><h2 style="margin:0">ใบเบิกสินค้า</h2><span class="badge ${reqFiles.length ? 'ok' : 'warn'}">${reqFiles.length} ไฟล์</span></div>
-      <div class="thumbs" style="margin-top:10px">${reqFiles.map(f => `<div class="thumb">${f.mime === 'application/pdf' ? '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-weight:700;color:var(--red)">PDF</div>' : `<img src="${blobSrc(f.id, f.blob)}">`}<div class="cap">${esc(f.name)}</div></div>`).join('')}</div>
-      ${closed ? '' : `<div class="btn-grid" style="margin-top:10px"><button class="btn" id="reqcam">ถ่ายใบเบิก</button><button class="btn" id="requp">อัปโหลดภาพ/PDF</button></div>`}
-      <h3>ยอดเบิก (กรอกด้วยมือ)</h3>
-      <div class="scroll-x"><table class="t"><tr><th>สินค้า</th><th>Part code</th><th class="right">จำนวนเบิก</th><th></th></tr>
-      ${lines.map(l => `<tr><td>${esc(l.productName)}</td><td class="mono">${esc(l.partCode)}</td><td class="right num">${l.qtyRequisition ?? '<span class="muted">ไม่มีข้อมูล</span>'}</td><td>${closed ? '' : `<button class="btn sm ghost" data-dl="${l.id}">ลบ</button>`}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">ยังไม่มี</td></tr>'}</table></div>
-      ${closed ? '' : '<button class="btn sm" id="addline" style="margin-top:8px">+ เพิ่มบรรทัด</button>'}
-      <p class="muted small">ยังไม่ได้กระทบยอดกับใบเบิกอัตโนมัติ</p></div>`;
-  } else {
-    const pending = rss.filter(rs => !isClosedResult(evs.get(rs.id))).length;
-    body = `<div class="card kv"><div><div class="k">ร้านทั้งหมด</div><div class="v num">${rss.length}</div></div><div><div class="k">มีผลแล้ว</div><div class="v num">${rss.length - pending}</div></div><div><div class="k">ค้าง</div><div class="v num">${pending}</div></div></div>`;
-  }
-  app.innerHTML = head + body + `
-    <div class="row between" style="margin:14px 0 8px"><h2 style="margin:0">ร้านในรอบงาน (${rss.length})</h2>
-      <label class="cb small"><input type="checkbox" id="oo" ${onlyOpen ? 'checked' : ''}> เฉพาะที่ยังไม่เสร็จ</label></div>
-    ${tab === 'prep' && !closed ? '<button class="btn primary big" id="pick" style="margin-bottom:10px">เลือกร้านเข้ารอบงาน</button>' : ''}
-    <div class="list">${storeList()}</div>
-    ${tab === 'field' && !closed ? '<div style="margin-top:16px"><button class="btn big" id="close">ปิดรอบงาน</button></div>' : ''}`;
+async function summaryPage(round, rss, evs) {
+  const id = round.id;
+  const reqFiles = (await db.roundFiles(id, 'requisition')).filter(f => f.role === 'original');
+  const nDocs = rss.filter(r => evs.get(r.id).docsReady).length, nField = rss.filter(r => evs.get(r.id).hasField).length, nDone = rss.filter(r => evs.get(r.id).status === 'complete').length;
+  app.innerHTML = `<div class="row between"><div><h1 class="mono" style="margin-bottom:0">${esc(round.code)}</h1><div class="muted">${fmtDate(round.workDate)} · ${esc(round.owner)}</div></div><a class="btn sm" href="#/">รอบงานทั้งหมด</a></div>
+    <div class="card" style="margin-top:10px"><div class="row between"><h2 style="margin:0">ใบเบิก</h2><span class="badge ${reqFiles.length ? 'ok' : 'warn'}">${reqFiles.length ? reqFiles.length + ' ไฟล์' : 'ยังไม่มี'}</span></div>
+      <div class="thumbs" style="margin-top:10px">${reqFiles.map(f => `<div class="thumb">${f.mime === 'application/pdf' ? `<button class="btn" style="width:100%;height:100%;color:var(--red)" data-pdf="${f.id}">PDF</button>` : `<img src="${blobSrc(f.id, f.blob)}" data-zoom-src>`}<button class="btn sm" style="position:absolute;top:4px;right:4px;min-height:28px;padding:0 8px" data-rmr="${f.id}">ลบ</button></div>`).join('')}</div>
+      <div class="btn-grid" style="margin-top:10px"><button class="btn" id="reqcam">ถ่ายใบเบิก</button><button class="btn" id="requp">อัปโหลดภาพ/PDF</button></div>
+      <div id="reqpv" class="pdfpages" style="margin-top:8px"></div></div>
+    <div class="kv"><div><div class="k">ร้าน</div><div class="v num">${rss.length}</div></div><div><div class="k">เตรียมเอกสารแล้ว</div><div class="v num">${nDocs}</div></div><div><div class="k">มีรูปลงพื้นที่</div><div class="v num">${nField}</div></div><div><div class="k">หลักฐานครบ</div><div class="v num">${nDone}</div></div></div>
+    <div style="display:grid;gap:8px;margin:12px 0"><a class="btn primary big" href="#/r/${id}/prep">เตรียมเอกสารรายร้าน</a><a class="btn primary big" href="#/r/${id}/field">ลงพื้นที่</a><a class="btn big" href="#/r/${id}/export">ดูตัวอย่าง / Export PDF</a></div>
+    <div class="row between" style="margin:14px 0 8px"><h2 style="margin:0">ร้านในรอบงาน (${rss.length})</h2><button class="btn sm" id="pick">+ เลือกร้าน</button></div>
+    <div class="list">${rss.map((rs, i) => { const ev = evs.get(rs.id); return `<div class="item"><div class="grow"><div class="t"><span class="mono">${esc(rs.storeCodeSnap)}</span> · ${esc(rs.storeNameSnap)}</div>
+      <div class="statusline">${chip(ev.docsReady, 'เอกสาร')}${chip(ev.hasField, 'รูปลงพื้นที่')}<span class="muted">ซิม ${ev.simCount}</span></div></div>
+      <div class="row" style="flex-direction:column;gap:2px"><button class="btn sm ghost" data-up="${rs.id}" ${i === 0 ? 'disabled' : ''}>▲</button><button class="btn sm ghost" data-dn="${rs.id}" ${i === rss.length - 1 ? 'disabled' : ''}>▼</button></div></div>`; }).join('') || '<div class="muted">ยังไม่มีร้าน</div>'}</div>`;
 
-  $('#oo').onchange = e => { sessionStorage.setItem('onlyOpen', e.target.checked ? '1' : '0'); roundPage(id, tab); };
-  if (tab === 'prep' && !closed) {
-    const addReq = guard(async (capture) => {
-      const files = await pickFiles({ accept: capture ? 'image/*' : 'image/*,application/pdf', capture });
-      for (const f of files) {
-        const err = checkImageFile(f, { allowPdf: true }); if (err) { toast(err, true); continue; }
-        const r = await saveOriginal(f, { roundId: id, kind: 'requisition', captureSource: capture ? 'camera' : 'upload' });
-        if (r.duplicate) toast(`${f.name} เคยอัปโหลดแล้ว`);
-      }
-      await db.audit({ entity: 'round', entityId: id, roundId: id, action: 'requisition_upload', after: files.map(f => f.name) });
-      roundPage(id, tab);
-    });
-    $('#reqcam').onclick = () => addReq(true); $('#requp').onclick = () => addReq(false);
-    $('#addline').onclick = guard(async () => {
-      const v = await modal(`<h2>เพิ่มยอดเบิก</h2><label class="f">ชื่อสินค้า</label><input type="text" id="pn">
-        <label class="f">Part code</label><input type="text" id="pc" placeholder="เช่น PRC0005821">
-        <label class="f">จำนวนเบิก (ซิม)</label><input type="text" inputmode="numeric" id="pq">
-        <div class="row" style="margin-top:12px"><button class="btn grow" data-close>ยกเลิก</button><button class="btn primary grow" id="ok">เพิ่ม</button></div>`,
-      { onMount: (m, close) => m.querySelector('#ok').onclick = () => {
-        const q = m.querySelector('#pq').value.trim(); const qi = q === '' ? null : parseIntStrict(q);
-        if (q !== '' && qi == null) return toast('จำนวนต้องเป็นจำนวนเต็ม', true);
-        close({ productName: m.querySelector('#pn').value.trim(), partCode: m.querySelector('#pc').value.trim(), qtyRequisition: qi });
-      } });
-      if (!v) return;
-      await db.update('rounds', id, round.version, r => { r.requisition.lines.push({ id: crypto.randomUUID(), ...v }); return r; });
-      await db.audit({ entity: 'round', entityId: id, roundId: id, action: 'requisition_line_add', after: v });
-      roundPage(id, tab);
-    });
-    $$('[data-dl]').forEach(b => b.onclick = guard(async () => {
-      const r = await confirmBox('ลบบรรทัดยอดเบิกนี้?', { danger: true, ok: 'ลบ', reason: true }); if (!r) return;
-      const before = lines.find(l => l.id === b.dataset.dl);
-      await db.update('rounds', id, round.version, x => { x.requisition.lines = x.requisition.lines.filter(l => l.id !== b.dataset.dl); return x; });
-      await db.audit({ entity: 'round', entityId: id, roundId: id, action: 'requisition_line_delete', before, reason: r });
-      roundPage(id, tab);
-    }));
-    $('#pick').onclick = guard(() => pickStores(round, rss));
-    const swap = guard(async (rsId, dir) => {
-      const i = rss.findIndex(x => x.id === rsId), j = i + dir; if (j < 0 || j >= rss.length) return;
-      const a = rss[i], b = rss[j];
-      await db.update('roundStores', a.id, a.version, { seq: b.seq }); await db.update('roundStores', b.id, b.version, { seq: a.seq });
-      roundPage(id, tab);
-    });
-    $$('[data-up]').forEach(b => b.onclick = () => swap(b.dataset.up, -1));
-    $$('[data-dn]').forEach(b => b.onclick = () => swap(b.dataset.dn, 1));
-  }
-  if (tab === 'field' && !closed) $('#close').onclick = guard(() => closeRound(round, rss, evs));
+  const addReq = guard(async capture => {
+    const files = await pickFiles({ accept: capture ? 'image/*' : 'image/*,application/pdf', capture });
+    for (const f of files) {
+      const err = checkImageFile(f, { allowPdf: true }); if (err) { toast(err, true); continue; }
+      const r = await saveOriginal(f, { roundId: id, kind: 'requisition', captureSource: capture ? 'camera' : 'upload' });
+      if (r.duplicate) toast(`${f.name} เคยอัปโหลดแล้ว`);
+    }
+    if (files.length) await db.audit({ entity: 'round', entityId: id, roundId: id, action: 'requisition_upload', after: files.map(f => f.name) });
+    if (currentRoute() === `r/${id}`) summaryPage(round, rss, evs);
+  });
+  $('#reqcam').onclick = () => addReq(true); $('#requp').onclick = () => addReq(false);
+  $$('[data-zoom-src]').forEach(i => i.onclick = () => zoomImage(i.src));
+  $$('[data-pdf]').forEach(b => b.onclick = guard(async () => { const f = await db.get('files', b.dataset.pdf); await renderPdfPreview($('#reqpv'), f.blob); }));
+  $$('[data-rmr]').forEach(b => b.onclick = guard(async () => {
+    if (!(await confirmBox('ลบไฟล์ใบเบิกนี้?', { danger: true, ok: 'ลบ' }))) return;
+    await db.update('files', b.dataset.rmr, null, x => ({ ...x, deletedAt: nowIso() }));
+    await db.audit({ entity: 'file', entityId: b.dataset.rmr, roundId: id, action: 'delete' });
+    summaryPage(round, rss, evs);
+  }));
+  $('#pick').onclick = guard(() => pickStores(round, rss));
+  const swap = guard(async (rsId, dir) => {
+    const i = rss.findIndex(x => x.id === rsId), j = i + dir; if (j < 0 || j >= rss.length) return;
+    const a = await db.get('roundStores', rss[i].id), b = await db.get('roundStores', rss[j].id);
+    await db.update('roundStores', a.id, a.version, { seq: b.seq }); await db.update('roundStores', b.id, b.version, { seq: a.seq });
+    roundPage(id, 'summary');
+  });
+  $$('[data-up]').forEach(b => b.onclick = () => swap(b.dataset.up, -1));
+  $$('[data-dn]').forEach(b => b.onclick = () => swap(b.dataset.dn, 1));
+}
+
+async function storeListPage(round, rss, evs, tab) {
+  const isPrep = tab === 'prep';
+  app.innerHTML = `<div class="row between"><div><h1 style="margin-bottom:0">${isPrep ? 'เตรียมเอกสารรายร้าน' : 'ลงพื้นที่ · เลือกร้านที่อยู่ตอนนี้'}</h1><div class="muted mono">${esc(round.code)}</div></div><a class="btn sm" href="#/r/${round.id}">หน้าสรุป</a></div>
+    <div class="list" style="margin-top:12px">${rss.map(rs => { const ev = evs.get(rs.id); return `<a class="item" href="#/s/${rs.id}/${tab}"><div class="grow">
+      <div class="t" style="font-size:17px"><span class="mono">${esc(rs.storeCodeSnap)}</span> · ${esc(rs.storeNameSnap)}</div>
+      <div class="statusline"><span class="badge ${statusBadge(ev.status)}">${esc(ev.statusText)}</span>${isPrep ? `<span class="muted">ซิม ${ev.simCount} · บิล ${ev.counts.bill} ภาพ${ev.billChecked ? ' · ติ๊กแล้ว' : ''}</span>` : `<span class="muted">รูป ${ev.counts.field}${ev.docsReady ? '' : ' · เอกสารยังไม่ครบ'}</span>`}</div></div><span style="font-size:22px;color:var(--g5)">›</span></a>`; }).join('') || '<div class="muted">ยังไม่มีร้าน — เพิ่มที่หน้าสรุป</div>'}</div>`;
 }
 
 async function pickStores(round, rss) {
@@ -251,32 +227,15 @@ async function pickStores(round, rss) {
     m.querySelector('#q').oninput = draw; draw();
     m.querySelector('#ok').onclick = () => close([...sel]);
   } });
-  if (r?.length) { await db.addStoresToRound(round.id, r); roundPage(round.id, 'prep'); }
+  if (r?.length) { await db.addStoresToRound(round.id, r); roundPage(round.id, 'summary'); }
 }
 
-async function closeRound(round, rss, evs) {
-  const notDone = rss.filter(rs => !isClosedResult(evs.get(rs.id)));
-  if (!rss.length) throw new Error('รอบงานยังไม่มีร้าน');
-  if (notDone.length) throw new Error(`ยังปิดรอบไม่ได้: มี ${notDone.length} ร้านที่ยังไม่มีผลชัดเจน (${notDone.map(r => r.storeCodeSnap).join(', ')})`);
-  const exAll = rss.flatMap(rs => evs.get(rs.id).exceptions.map(e => `${rs.storeCodeSnap}: ${e.text}${e.reason ? ' — ' + e.reason : ''}`));
-  const others = rss.filter(rs => evs.get(rs.id).status === 'other').map(rs => `${rs.storeCodeSnap}: ${OUTCOME_TEXT[rs.outcome]} — ${rs.outcomeReason}`);
-  const ok = await modal(`<h2>ปิดรอบงาน ${esc(round.code)}</h2>
-    <h3>ข้อยกเว้น (${exAll.length})</h3><ul class="small">${exAll.map(x => `<li>${esc(x)}</li>`).join('') || '<li>ไม่มี</li>'}</ul>
-    <h3>ร้านที่ไม่ได้ส่ง (${others.length})</h3><ul class="small">${others.map(x => `<li>${esc(x)}</li>`).join('') || '<li>ไม่มี</li>'}</ul>
-    <p class="muted small">ไฟล์ทั้งหมดบันทึกในเครื่องแล้ว</p>
-    <div class="row" style="margin-top:12px"><button class="btn grow" data-close>ยกเลิก</button><button class="btn primary grow" data-close="go">ยืนยันปิดรอบงาน</button></div>`);
-  if (ok !== 'go') return;
-  await db.update('rounds', round.id, round.version, { status: 'closed', closedAt: nowIso(), closedBy: USER.name });
-  await db.audit({ entity: 'round', entityId: round.id, roundId: round.id, action: 'close', after: { exceptions: exAll.length } });
-  toast('ปิดรอบงานแล้ว'); nav(`#/r/${round.id}/export`);
-}
-
-// ---------- Export ----------
+// ---------- ดูตัวอย่าง / Export ----------
 let pdfjs;
 async function renderPdfPreview(el, blob) {
   if (!pdfjs) { pdfjs = await import(new URL('vendor/pdf.min.mjs', location.href).href); pdfjs.GlobalWorkerOptions.workerSrc = new URL('vendor/pdf.worker.min.mjs', location.href).href; }
   const doc = await pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
-  el.innerHTML = `<p class="muted small">ตัวอย่างจากไฟล์ PDF ที่สร้างจริง · ${doc.numPages} หน้า</p>`;
+  el.innerHTML = `<p class="muted small">${doc.numPages} หน้า</p>`;
   for (let i = 1; i <= doc.numPages; i++) {
     const p = await doc.getPage(i); const vp = p.getViewport({ scale: Math.min(2, (el.clientWidth || 360) * 2 / p.getViewport({ scale: 1 }).width) });
     const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height; el.appendChild(c);
@@ -284,61 +243,53 @@ async function renderPdfPreview(el, blob) {
   }
 }
 
-async function exportPage(round, rss, evs, head) {
-  const reports = (await db.byIndex('reports', 'roundId', round.id)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const snapAll = await buildSnapshot(round.id);
-  const latestRound = reports.find(r => r.scope === 'round');
-  app.innerHTML = head + `
-    <div class="card"><h2>สรุปรอบงาน</h2>
-      <div class="kv">${[['ร้าน', rss.length], ['ส่งแล้ว', rss.filter(r => evs.get(r.id).status === 'submitted').length], ['ไม่ได้ส่ง', rss.filter(r => evs.get(r.id).status === 'other').length], ['ค้าง', rss.filter(r => !isClosedResult(evs.get(r.id))).length], ['ข้อยกเว้น', rss.reduce((a, r) => a + evs.get(r.id).exceptions.length, 0)]].map(([k, v]) => `<div><div class="k">${k}</div><div class="v num">${v}</div></div>`).join('')}</div>
-      <h3>รายการค้าง / ข้อยกเว้น</h3><ul class="small">${rss.flatMap(rs => { const ev = evs.get(rs.id); return [...ev.checks.filter(c => !c.ok && !isClosedResult(ev)).map(c => `<li><b class="mono">${esc(rs.storeCodeSnap)}</b> ยังขาด: ${esc(c.label)}</li>`), ...ev.exceptions.map(e => `<li><b class="mono">${esc(rs.storeCodeSnap)}</b> ข้อยกเว้น: ${esc(e.text)}${e.reason ? ' — ' + esc(e.reason) : ''}</li>`)]; }).join('') || '<li>ไม่มี</li>'}</ul></div>
-    <div class="card"><h2>Export</h2>
+async function exportPage(round, rss, evs) {
+  const reqN = (await db.roundFiles(round.id, 'requisition')).filter(f => f.role === 'original').length;
+  const missing = [...(reqN ? [] : ['ใบเบิก']), ...rss.filter(rs => evs.get(rs.id).missing.length).map(rs => `${rs.storeCodeSnap}: ${evs.get(rs.id).missing.join(', ')}`)];
+  // ช่อง "เพิ่มหน้าสรุปข้อมูล" เริ่มต้นไม่เลือกทุกครั้งที่เปิดหน้านี้ (ไม่จำค่าเดิม)
+  app.innerHTML = `<div class="row between"><div><h1 style="margin-bottom:0">ดูตัวอย่าง / Export</h1><div class="muted mono">${esc(round.code)}</div></div><a class="btn sm" href="#/r/${round.id}">หน้าสรุป</a></div>
+    <div class="card" style="margin-top:10px">
+      ${missing.length ? `<div class="small" style="color:var(--red)"><b>หลักฐานยังไม่ครบ — PDF จะเป็นฉบับร่าง</b><ul style="margin:4px 0 0;padding-left:18px">${missing.map(m => `<li>${esc(m)}</li>`).join('')}</ul></div>` : '<b style="color:var(--ok)">หลักฐานครบทุกร้าน</b>'}
       <label class="f">ขอบเขต</label><select id="scope"><option value="">ทั้งรอบงาน</option>${rss.map(rs => `<option value="${rs.id}">ร้าน ${esc(rs.storeCodeSnap)} · ${esc(rs.storeNameSnap)}</option>`).join('')}</select>
-      ${!snapAll.complete ? '<p class="small" style="color:var(--red)">หลักฐานยังไม่ครบ — PDF จะติดป้าย "ฉบับร่าง / หลักฐานไม่ครบ"</p>' : ''}
-      ${latestRound && latestRound.snapshotHash !== snapAll.hash ? `<p class="small" style="color:var(--warn)">รายงานล่าสุด ${esc(latestRound.code)} v${latestRound.version} ไม่ใช่ข้อมูลล่าสุดแล้ว (ข้อมูลถูกแก้หลังสร้าง)</p>` : ''}
-      <div class="btn-grid" style="margin-top:10px"><button class="btn primary" id="mkpdf">สร้าง PDF</button><button class="btn" id="csv1">CSV รายการซิม</button><button class="btn" id="csv2">CSV สรุปบิล</button></div>
-      <p class="muted small">เปิด CSV ใน Excel: ใช้ Data › From Text/CSV แล้วตั้งคอลัมน์รหัส (S/N, เบอร์, เลขร้าน) เป็น Text เพื่อไม่ให้เลขศูนย์หน้า/เลขยาวเพี้ยน</p>
+      <label class="cb" style="margin-top:8px"><input type="checkbox" id="sum"> เพิ่มหน้าสรุปข้อมูล</label>
+      <button class="btn primary big" id="mkpdf" style="margin-top:8px">ดูตัวอย่าง PDF</button>
       <div id="prog" class="muted small"></div></div>
-    <div class="card"><h2>รายงานที่สร้างแล้ว</h2><div class="list">${reports.map(r => `<div class="item"><div class="grow"><div class="t mono">${esc(r.code)} v${r.version}</div><div class="muted">${fmtDateTime(r.createdAt)} · ${esc(r.createdBy)} ${r.isDraft ? '<span class="badge warn">ฉบับร่าง</span>' : '<span class="badge ok">ครบ</span>'} ${r.scope === 'round' && r.snapshotHash !== snapAll.hash ? '<span class="badge">ไม่ใช่ข้อมูลล่าสุด</span>' : ''}</div></div><button class="btn sm" data-dlr="${r.fileId}">ดาวน์โหลด</button><button class="btn sm" data-pv="${r.fileId}">ดู</button></div>`).join('') || '<div class="muted">ยังไม่มี</div>'}</div></div>
-    <div class="card hidden" id="pvcard"><div class="row between"><h2 style="margin:0">Preview</h2><button class="btn sm" id="pvdl">ดาวน์โหลด PDF</button></div><div class="pdfpages" id="pv" style="margin-top:8px"></div></div>`;
-
-  const scopeSnap = async () => { const v = $('#scope').value; return v ? buildSnapshot(round.id, { rsIds: [v] }) : snapAll; };
-  const showPv = async (file) => { $('#pvcard').classList.remove('hidden'); $('#pvdl').onclick = guard(() => download(file.blob, file.name)); await renderPdfPreview($('#pv'), file.blob); $('#pvcard').scrollIntoView({ behavior: 'smooth' }); };
+    <div class="card hidden" id="pvcard"><div class="row between"><h2 style="margin:0">ตัวอย่าง</h2><button class="btn primary sm" id="pvdl">ดาวน์โหลด PDF</button></div><div class="pdfpages" id="pv" style="margin-top:8px"></div></div>
+    <div class="card"><h2>CSV</h2><div class="btn-grid"><button class="btn" id="csv1">รายการซิม</button><button class="btn" id="csv2">สรุปรายร้าน</button></div></div>`;
+  const scopeSnap = async () => { const v = $('#scope').value; return v ? buildSnapshot(round.id, { rsIds: [v] }) : buildSnapshot(round.id); };
+  let current = null;
+  const invalidate = () => { current = null; $('#pvcard').classList.add('hidden'); $('#pv').innerHTML = ''; };
+  $('#scope').onchange = invalidate; $('#sum').onchange = invalidate;
   $('#mkpdf').onclick = guard(async () => {
     $('#mkpdf').disabled = true; $('#prog').textContent = 'กำลังสร้าง PDF…';
     try {
       const { createReport } = await import('./report.js');
-      const snap = await scopeSnap(); const { file } = await createReport(snap, USER);
-      $('#prog').textContent = `สร้างแล้ว: ${file.name}`; await showPv(file);
+      const snap = await scopeSnap(); const { file } = await createReport(snap, USER, { includeSummary: $('#sum').checked });
+      current = file; $('#prog').textContent = file.name;
+      $('#pvcard').classList.remove('hidden'); await renderPdfPreview($('#pv'), file.blob); $('#pvcard').scrollIntoView({ behavior: 'smooth' });
     } finally { $('#mkpdf').disabled = false; }
   });
+  // ดาวน์โหลดไฟล์เดียวกับที่แสดงตัวอย่าง (ไม่สร้างใหม่)
+  $('#pvdl').onclick = guard(async () => { if (!current) throw new Error('กด "ดูตัวอย่าง PDF" ก่อน'); await download(current.blob, current.name); });
   $('#csv1').onclick = guard(async () => { const s = await scopeSnap(); await download(new Blob([simsCsv(s)], { type: 'text/csv;charset=utf-8' }), `${round.code}-sims${s.scope === 'store' ? '-' + s.stores[0].code : ''}.csv`); });
-  $('#csv2').onclick = guard(async () => { const s = await scopeSnap(); await download(new Blob([billsCsv(s)], { type: 'text/csv;charset=utf-8' }), `${round.code}-bills${s.scope === 'store' ? '-' + s.stores[0].code : ''}.csv`); });
-  $$('[data-dlr]').forEach(b => b.onclick = guard(async () => { const f = await db.get('files', b.dataset.dlr); await download(f.blob, f.name); }));
-  $$('[data-pv]').forEach(b => b.onclick = guard(async () => showPv(await db.get('files', b.dataset.pv))));
+  $('#csv2').onclick = guard(async () => { const s = await scopeSnap(); await download(new Blob([storesCsv(s)], { type: 'text/csv;charset=utf-8' }), `${round.code}-stores${s.scope === 'store' ? '-' + s.stores[0].code : ''}.csv`); });
 }
 
-// ---------- ส่วนกลาง ----------
+// ---------- ส่วนกลาง (ดูอย่างเดียว · ข้อมูลในเครื่องนี้) ----------
 async function centralPage() {
   if (USER.role !== 'central') { app.innerHTML = '<div class="card">หน้านี้สำหรับบทบาทส่วนกลาง</div>'; return; }
   const rounds = (await db.all('rounds')).sort((a, b) => b.workDate.localeCompare(a.workDate));
-  const filter = sessionStorage.getItem('cf') || 'all';
   let html = '';
   for (const r of rounds) {
     const rss = await db.roundStoresOf(r.id); const items = [];
     for (const rs of rss) {
       const ev = evaluate(rs, await loadStoreData(rs));
-      if (filter === 'ex' && !ev.exceptions.length && ev.status !== 'needs_fix') continue;
-      if (filter === 'submitted' && ev.status !== 'submitted') continue;
-      items.push(`<a class="item" href="#/s/${rs.id}/review"><div class="grow"><div class="t"><span class="mono">${esc(rs.storeCodeSnap)}</span> · ${esc(rs.storeNameSnap)}</div>
-        <div class="statusline"><span class="badge ${badgeFor(ev.status)}">${esc(ev.statusText)}</span>${ev.exceptions.length ? `<span class="badge bad">ข้อยกเว้น ${ev.exceptions.length}</span>` : ''}${rs.review ? `<span class="badge ${rs.review.status === 'returned' ? 'bad' : rs.review.status === 'reviewed' ? 'ok' : 'warn'}">${REVIEW_TEXT[rs.review.status]}</span>` : ''}</div></div></a>`);
+      items.push(`<a class="item" href="#/s/${rs.id}/prep"><div class="grow"><div class="t"><span class="mono">${esc(rs.storeCodeSnap)}</span> · ${esc(rs.storeNameSnap)}</div>
+        <div class="statusline"><span class="badge ${statusBadge(ev.status)}">${esc(ev.statusText)}</span>${ev.missing.length ? `<span class="muted">ขาด: ${esc(ev.missing.join(', '))}</span>` : ''}</div></div></a>`);
     }
-    if (items.length) html += `<h3><a href="#/r/${r.id}/export" class="mono">${esc(r.code)}</a> · ${fmtDate(r.workDate)} · ${esc(r.owner)}</h3><div class="list">${items.join('')}</div>`;
+    if (items.length) html += `<h3><a href="#/r/${r.id}" class="mono">${esc(r.code)}</a> · ${fmtDate(r.workDate)} · ${esc(r.owner)}</h3><div class="list">${items.join('')}</div>`;
   }
-  app.innerHTML = `<div class="row between"><h1>ส่วนกลางตรวจหลักฐาน</h1><a class="btn sm" href="#/">กลับ</a></div>
-    <select id="cf"><option value="all">ทุกร้าน</option><option value="ex">มีข้อยกเว้น / ต้องแก้ไข</option><option value="submitted">ส่งแล้ว</option></select>
-    <div style="margin-top:8px">${html || '<p class="muted">ไม่มีรายการ</p>'}</div>`;
-  $('#cf').value = filter; $('#cf').onchange = e => { sessionStorage.setItem('cf', e.target.value); centralPage(); };
+  app.innerHTML = `<div class="row between"><h1>ส่วนกลาง</h1><a class="btn sm" href="#/">กลับ</a></div><p class="muted small">ข้อมูลในเครื่องนี้เท่านั้น ยังไม่มีระบบส่งส่วนกลาง</p>${html || '<p class="muted">ไม่มีรายการ</p>'}`;
 }
 
 // ---------- start ----------
