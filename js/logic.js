@@ -1,91 +1,55 @@
-// ===== กฎ V2: สถานะร้าน, ช่องติ๊กยืนยันจำนวน, snapshot รายงาน =====
-// V2 ไม่บังคับอ่านบิล ไม่บังคับยืนยันซิมทีละรายการ และไม่มีขั้นส่ง/ปิดรอบ
-// ข้อมูลรุ่นเก่า (prep, delivery, exceptions, bills OCR, submittedAt) ยังเก็บอยู่ แต่ไม่ถูกใช้ตัดสินสถานะ
+// ===== กฎสถานะร้าน + ข้อมูลสำหรับรายงาน (เวอร์ชันเก็บรูปอย่างเดียว) =====
+// ร้านมี 3 สถานะ: รอเตรียมข้อมูล → รอถ่ายรูปหน้าร้าน → เสร็จ
+// ข้อมูลรุ่นเก่า (ซิม, บิล OCR, ช่องติ๊ก) ยังอยู่ในเครื่อง แต่ไม่ใช้ตัดสินสถานะ
 import * as db from './db.js';
 import { ensureDerived } from './image.js';
 
-export const STATUS_TEXT = {
-  none: 'ยังไม่เตรียม', prepared: 'เตรียมเอกสารแล้ว', field: 'มีรูปลงพื้นที่แล้ว', complete: 'หลักฐานครบ',
-};
+export const STATUS_TEXT = { none: 'รอเตรียมข้อมูล', prepared: 'รอถ่ายรูปหน้าร้าน', complete: 'เสร็จ' };
+export function statusBadge(status) { return { complete: 'ok', prepared: 'info', none: '' }[status] ?? ''; }
 
-/** กุญแจชุดรายการซิม: S/N ที่ไม่ซ้ำ เรียงแล้ว — เปลี่ยนเมื่อเพิ่ม/ลบ/แก้/ย้ายซิม */
-export function simKey(sims) { return [...new Set(sims.map(s => s.serial).filter(Boolean))].sort().join('|'); }
-/** กุญแจชุดภาพบิล: id ภาพต้นฉบับ เรียงแล้ว — เปลี่ยนเมื่อเพิ่ม/ลบ/เปลี่ยนภาพบิล */
-export function billKey(billFiles) { return billFiles.map(f => f.id).sort().join('|'); }
-export function uniqueSimCount(sims) { return new Set(sims.map(s => s.serial).filter(Boolean)).size; }
+const originals = (files, kind) => files.filter(f => f.kind === kind && f.role === 'original');
 
-export async function loadStoreData(rs) {
-  const [sims, files] = await Promise.all([db.simsOfRs(rs.id), db.filesOf(rs.id)]);
-  return { sims, files };
+/** กุญแจชุดรูปก่อนเข้าร้าน — เปลี่ยนเมื่อเพิ่ม/ลบรูปบาร์โค้ดหรือรูปบิล */
+export function prepKey(files) { return [...originals(files, 'barcode'), ...originals(files, 'bill')].map(f => f.id).sort().join('|'); }
+
+export async function loadStoreData(rs) { return { files: await db.filesOf(rs.id) }; }
+
+export function evaluate(rs, { files }) {
+  const barcode = originals(files, 'barcode'), bill = originals(files, 'bill'), field = originals(files, 'field');
+  const hasPhotos = barcode.length > 0 && bill.length > 0;
+  const confirmed = !!(rs.prepConfirm?.key && hasPhotos && rs.prepConfirm.key === prepKey(files));
+  const hasField = field.length > 0;
+  const status = confirmed && hasField ? 'complete' : confirmed ? 'prepared' : 'none';
+  const missing = [];
+  if (!barcode.length) missing.push('รูปบาร์โค้ด');
+  if (!bill.length) missing.push('รูปบิล');
+  if (hasPhotos && !confirmed) missing.push('ยืนยันข้อมูลร้าน');
+  if (!hasField) missing.push('รูปหน้าร้าน');
+  return { status, statusText: STATUS_TEXT[status], confirmed, hasPhotos, hasField, missing, counts: { barcode: barcode.length, bill: bill.length, field: field.length } };
 }
 
-/** ช่องติ๊กยังมีผลหรือไม่: ต้องติ๊กโดยผู้ใช้ และชุดซิม/ชุดภาพบิลยังเหมือนตอนติ๊ก */
-export function billCheckValid(rs, sims, billFiles) {
-  const c = rs.billCheck;
-  return !!(c?.checked && sims.length > 0 && billFiles.length > 0 && c.simKey === simKey(sims) && c.billKey === billKey(billFiles));
+/** รูปหน้าแรกของรอบ: ไฟล์แรกที่ยังไม่ถูกลบ (รอบเก่าอาจมีใบเบิกหลายไฟล์) */
+export async function coverFile(roundId) {
+  return (await db.roundFiles(roundId, 'requisition')).filter(f => f.role === 'original')[0] || null;
 }
 
-export function evaluate(rs, { sims, files }) {
-  const originals = files.filter(f => f.role === 'original');
-  const barcodeFiles = originals.filter(f => f.kind === 'barcode');
-  const billFiles = originals.filter(f => f.kind === 'bill');
-  const fieldFiles = originals.filter(f => f.kind === 'field');
-  const simCount = uniqueSimCount(sims);
-  const billChecked = billCheckValid(rs, sims, billFiles);
-  const missingDocs = [];
-  if (!barcodeFiles.length) missingDocs.push('ภาพ Barcode');
-  if (!simCount) missingDocs.push('รายการซิม');
-  if (!billFiles.length) missingDocs.push('ภาพบิล');
-  if (!billChecked) missingDocs.push('ติ๊กยืนยันจำนวนซิมในบิล');
-  const docsReady = missingDocs.length === 0;
-  const hasField = fieldFiles.length > 0;
-  const missing = [...missingDocs, ...(hasField ? [] : ['รูปลงพื้นที่'])];
-  const status = docsReady && hasField ? 'complete' : hasField ? 'field' : docsReady ? 'prepared' : 'none';
-  return {
-    status, statusText: STATUS_TEXT[status], docsReady, hasField, billChecked, missingDocs, missing, simCount,
-    counts: { barcode: barcodeFiles.length, bill: billFiles.length, field: fieldFiles.length, sims: simCount },
-  };
-}
-
-/** ยกเลิกการติ๊กยืนยันจำนวน (เมื่อชุดซิมหรือภาพบิลเปลี่ยน) */
-export async function resetBillCheck(rsId, reason) {
-  const cur = await db.get('roundStores', rsId);
-  if (!cur?.billCheck?.checked) return;
-  await db.update('roundStores', rsId, cur.version, x => ({ ...x, billCheck: { checked: false, resetAt: new Date().toISOString(), resetReason: reason } }));
-  await db.audit({ entity: 'roundStore', entityId: rsId, roundId: cur.roundId, action: 'bill_check_reset', reason });
-}
-
-export function statusBadge(status) { return { complete: 'ok', prepared: 'info', field: 'warn', none: '' }[status] ?? ''; }
-
-/** snapshot สำหรับ PDF/CSV — เรียงร้านตามลำดับในรอบงาน, ภาพเรียงตามเวลาที่เพิ่ม */
-export async function buildSnapshot(roundId, { rsIds = null } = {}) {
+/** ข้อมูลสำหรับสร้าง PDF — เรียงร้านตามลำดับในรอบงาน รูปเรียงตามเวลาที่เพิ่ม */
+export async function buildSnapshot(roundId) {
   const round = await db.get('rounds', roundId);
-  let rss = await db.roundStoresOf(roundId);
-  if (rsIds) rss = rss.filter(r => rsIds.includes(r.id));
-  const requisitionFiles = (await db.roundFiles(roundId, 'requisition')).filter(f => f.role === 'original');
+  const cover = await coverFile(roundId);
   const stores = [];
-  for (const rs of rss) {
+  for (const rs of await db.roundStoresOf(roundId)) {
     const d = await loadStoreData(rs); const ev = evaluate(rs, d);
-    const origs = kind => d.files.filter(f => f.role === 'original' && f.kind === kind);
-    const images = {};
-    for (const kind of ['barcode', 'bill', 'field']) {
-      images[kind] = [];
-      for (const o of origs(kind)) images[kind].push((await ensureDerived(o, rs)).id); // ลายน้ำตรงร้านและตัวเลือกปัจจุบัน
-    }
+    const field = [];
+    for (const o of originals(d.files, 'field')) field.push((await ensureDerived(o, rs)).id); // รูปพร้อมลายน้ำ
     stores.push({
-      rsId: rs.id, seq: rs.seq, code: rs.storeCodeSnap, name: rs.storeNameSnap, status: ev.status, statusText: ev.statusText,
-      simCount: ev.simCount, counts: ev.counts, billChecked: ev.billChecked, billCheckedAt: ev.billChecked ? rs.billCheck.at : null,
-      billCheckedBy: ev.billChecked ? rs.billCheck.by : null, missing: ev.missing, fieldShowTime: !!rs.fieldShowTime,
-      sims: d.sims.map(s => ({ serial: s.serial, barcodeRaw: s.barcodeRaw, msisdn: s.msisdn, partNo: s.partNo, check: s.check, entry: s.entry, note: s.note || '',
-        sourceFileName: d.files.find(f => f.id === s.sourceFileId)?.name || '', movedFrom: s.movedFrom || null })),
-      images,
+      rsId: rs.id, seq: rs.seq, code: rs.storeCodeSnap, name: rs.storeNameSnap, status: ev.status, missing: ev.missing,
+      images: { barcode: originals(d.files, 'barcode').map(f => f.id), bill: originals(d.files, 'bill').map(f => f.id), field },
     });
   }
   return {
     round: { id: round.id, code: round.code, workDate: round.workDate, owner: round.owner },
-    requisition: { fileIds: requisitionFiles.map(f => f.id) },
-    scope: rsIds ? 'store' : 'round', stores,
-    complete: stores.length > 0 && stores.every(s => s.status === 'complete') && requisitionFiles.length > 0,
-    missingRequisition: requisitionFiles.length === 0,
+    coverId: cover?.id || null, stores,
+    complete: !!cover && stores.length > 0 && stores.every(s => s.status === 'complete'),
   };
 }
