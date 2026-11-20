@@ -28,7 +28,7 @@ export async function renderStore(app, rsId, user) {
     <div class="thumbs" style="margin-top:8px">${thumbs(list, 'data-rm')}</div>
     <div class="btn-grid" style="margin-top:8px"><button class="btn" data-cam="${kind}">ถ่ายรูป</button><button class="btn" data-up="${kind}">เลือกรูป</button></div></div>`;
 
-  app.innerHTML = `<div class="row between" style="margin-bottom:8px"><a class="btn sm" href="#/r/${round.id}">← ${esc(round.code)}</a><span class="muted small">ลำดับ ${rs.seq}/${all.length}</span></div>
+  app.innerHTML = `<div class="row between" style="margin-bottom:8px"><a class="btn sm" href="#/r/${round.id}">← ${esc(round.code)}</a><span class="muted small">ร้านที่ ${all.findIndex(x => x.id === rs.id) + 1}/${all.length}</span></div>
     <div class="storebar"><div><div class="code">${esc(rs.storeCodeSnap)}</div><div class="name">${esc(rs.storeNameSnap)}</div></div><span class="st">${esc(ev.statusText)}</span></div>
     <div id="progress" class="card hidden"><div id="ptext" class="small"></div></div>
 
@@ -44,6 +44,7 @@ export async function renderStore(app, rsId, user) {
       ${shownField.map(({ o, d }) => `<div style="position:relative;margin-top:8px"><img src="${blobSrc(d.id, d.blob)}" data-zoom-src style="width:100%;border-radius:10px;display:block"><button class="btn sm" style="position:absolute;top:6px;right:6px;min-height:28px;padding:0 8px" data-rm="${o.id}">ลบ</button>${takenAt(o) ? '' : '<div class="small" style="color:var(--red)">ไม่พบเวลาถ่าย</div>'}</div>`).join('')}
       <div class="btn-grid" style="margin-top:8px"><button class="btn ${field.length ? '' : 'primary'} big" id="shop" ${ev.confirmed ? '' : 'disabled'}>${field.length ? 'ถ่ายใหม่ · หน้าร้าน' : 'ถ่ายรูปหน้าร้าน'}</button><button class="btn big" id="selfie" ${ev.confirmed ? '' : 'disabled'}>${field.length ? 'ถ่ายใหม่ · เซลฟี่' : 'ถ่ายเซลฟี่กับร้าน'}</button></div>
     </div>
+    ${data.files.length ? '' : '<button class="btn ghost" id="rmrs" style="width:100%;margin-top:6px">นำออกจากรอบ</button>'}
     <div class="bottombar"><a class="btn" href="#/r/${round.id}">รายชื่อร้าน</a>${nxt ? `<a class="btn primary" href="#/s/${nxt.id}">ร้านถัดไป ›</a>` : `<a class="btn primary" href="#/r/${round.id}">สร้างรายงาน ›</a>`}</div>`;
 
   const prog = t => { if (currentRoute() !== route) return; $('#progress').classList.remove('hidden'); $('#ptext').textContent = t; };
@@ -108,6 +109,11 @@ export async function renderStore(app, rsId, user) {
     reload();
   }));
   $$('[data-zoom-src]').forEach(i => i.onclick = () => zoomImage(i.src));
+  const rm = $('#rmrs');
+  if (rm) rm.onclick = guard(async () => {
+    if (!(await confirmBox(`นำร้าน ${rs.storeCodeSnap} ออกจากรอบนี้?`, { ok: 'นำออก' }))) return;
+    await db.removeStoreFromRound(rs.id); toast('นำออกจากรอบแล้ว'); nav(`#/r/${rs.roundId}`);
+  });
 }
 
 async function softDelete(f, reason) {
