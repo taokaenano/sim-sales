@@ -175,7 +175,15 @@ export async function createRound({ workDate, owner }) {
 }
 
 export async function roundStoresOf(roundId) {
-  return (await byIndex('roundStores', 'roundId', roundId)).sort((a, b) => a.seq - b.seq);
+  return (await byIndex('roundStores', 'roundId', roundId)).filter(x => !x.deletedAt).sort((a, b) => a.seq - b.seq);
+}
+
+/** นำร้านออกจากรอบ (เฉพาะร้านที่ยังไม่มีรูป) — ข้อมูลร้านในระบบยังอยู่ */
+export async function removeStoreFromRound(rsId) {
+  const rs = await get('roundStores', rsId);
+  if ((await filesOf(rsId)).length) throw new Error('ร้านนี้มีรูปแล้ว ลบรูปก่อนจึงนำออกได้');
+  await update('roundStores', rsId, rs.version, x => ({ ...x, deletedAt: nowIso() }));
+  await audit({ entity: 'round', entityId: rs.roundId, roundId: rs.roundId, action: 'remove_store', after: rs.storeCodeSnap });
 }
 
 /** เพิ่มร้านเข้ารอบงาน — เก็บชื่อ/เลขร้าน ณ เวลานั้นไว้ (snapshot) */
