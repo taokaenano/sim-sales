@@ -65,7 +65,8 @@ export function pickFiles({ accept = 'image/*', multiple = true, capture = false
   }
   const i = picker;
   i.value = ''; i.accept = accept; i.multiple = multiple;
-  if (capture) i.setAttribute('capture', 'environment'); else i.removeAttribute('capture');
+  // capture: 'user' = กล้องหน้า (เซลฟี่), อื่น ๆ = กล้องหลัง, false = เลือกจากคลังรูป
+  if (capture) i.setAttribute('capture', capture === 'user' ? 'user' : 'environment'); else i.removeAttribute('capture');
   return new Promise(res => {
     let done = false;
     const finish = f => { if (done) return; done = true; i.onchange = null; i.oncancel = null; res(f); };
