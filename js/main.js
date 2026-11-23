@@ -6,6 +6,7 @@ import { $, $$, toast, guard, modal, confirmBox, blobSrc, pickFiles, errMsg, nav
 import { checkImageFile, saveOriginal } from './image.js';
 import { evaluate, loadStoreData, buildSnapshot, statusBadge, coverFile } from './logic.js';
 import { renderStore } from './store.js';
+import { teamStatus, unlockTeam, syncTeam } from './teamdata.js';
 
 const app = document.getElementById('app');
 export let USER = { name: '' };
@@ -58,7 +59,10 @@ async function home() {
       <div class="right"><span class="badge ${rss.length && done === rss.length ? 'ok' : ''}">เสร็จ ${done}/${rss.length}</span></div></a>`);
   }
   const est = await db.storageEstimate();
-  app.innerHTML = `
+  const team = await teamStatus();
+  app.innerHTML = `${team.state === 'locked' ? `
+    <div class="card"><h2>รายชื่อร้านของทีม</h2>
+      <div class="row"><input type="password" id="tk" placeholder="รหัสทีม" autocomplete="off" autocapitalize="off" class="grow"><button class="btn primary" id="tku">ปลดล็อก</button></div></div>` : ''}
     <div class="card"><h2>เริ่มงาน</h2>
       <div class="row"><div class="grow"><label class="f">วันที่</label><input type="date" id="wd" value="${todayYmd()}"></div>
       <div class="grow"><label class="f">ผู้รับผิดชอบ</label><input type="text" id="ow" value="${esc(USER.name)}"></div></div>
@@ -66,6 +70,15 @@ async function home() {
     <div class="row between"><h2 style="margin:0">รอบงาน</h2><a class="btn sm" href="#/stores">ร้านค้า</a></div>
     <div class="list" style="margin-top:10px">${rows.join('') || '<div class="muted">ยังไม่มีรอบงาน</div>'}</div>
     ${est ? `<p class="muted small" style="margin-top:16px">พื้นที่ในเครื่องที่ใช้ ${(est.usage / 1e6).toFixed(1)} MB จาก ${(est.quota / 1e6).toFixed(0)} MB</p>` : ''}`;
+  const tku = $('#tku');
+  if (tku) {
+    const go = guard(async () => {
+      tku.disabled = true;
+      try { const r = await unlockTeam($('#tk').value); toast(`รายชื่อร้าน ${r.total} ร้าน · เพิ่มใหม่ ${r.added}${r.renamed ? ` · อัปเดตชื่อ ${r.renamed}` : ''}`); home(); }
+      finally { tku.disabled = false; }
+    });
+    tku.onclick = go; $('#tk').onkeydown = e => { if (e.key === 'Enter') go(); };
+  }
   $('#mk').onclick = guard(async () => {
     const owner = $('#ow').value.trim(); if (!owner) throw new Error('ต้องระบุผู้รับผิดชอบ');
     const r = await db.createRound({ workDate: $('#wd').value || todayYmd(), owner });
@@ -129,7 +142,7 @@ async function readRows(f) {
   // raw:false = ใช้ข้อความตามที่แสดงใน Excel (เลข 0 ข้างหน้ารหัสร้านไม่หาย)
   return XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' }).map(r => r.map(x => String(x ?? ''))).filter(r => r.some(x => x.trim()));
 }
-const CODE_H = /^(shop\s*code|store\s*code|code|รหัส\s*ร้าน|เลข\s*ร้าน|รหัส)$/i, NAME_H = /^(shop\s*name|store\s*name|name|ชื่อ\s*ร้าน|ชื่อ)$/i;
+const CODE_H = /^(join[_\s]*code|shop\s*code|store\s*code|code|รหัส\s*ร้าน|เลข\s*ร้าน|รหัส)$/i, NAME_H = /^(retailer\s*name|shop\s*name|store\s*name|name|ชื่อ\s*ร้าน|ชื่อ)$/i;
 async function importStores() {
   const [f] = await pickFiles({ accept: '.xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel', multiple: false }); if (!f) return;
   let rows = await readRows(f);
@@ -278,4 +291,6 @@ async function renderPdfPreview(el, blob, maxPages = Infinity) {
 $('#who').onclick = askWho;
 await db.openDb(); db.requestPersist();
 await refreshWho();
+// รายชื่อร้านของทีมเปลี่ยน (ไฟล์บนเว็บอัปเดต) → อัปเดตในเครื่องเอง ไม่ต้องใส่รหัสซ้ำ
+syncTeam().then(r => { if (r && (r.added || r.renamed)) toast(`อัปเดตรายชื่อร้าน · เพิ่มใหม่ ${r.added} · อัปเดตชื่อ ${r.renamed}`); }).catch(() => {});
 nav(location.hash.startsWith('#/') ? location.hash : '');
