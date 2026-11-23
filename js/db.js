@@ -148,6 +148,20 @@ export async function addStore({ code, name, area = '', note = '' }) {
   return s;
 }
 
+/** นำเข้ารายชื่อร้านหลายร้าน: รหัสใหม่ → เพิ่ม, รหัสเดิมแต่ชื่อเปลี่ยน → อัปเดตชื่อ */
+export async function upsertStoresBulk(list) {
+  const byCode = new Map((await all('stores')).map(s => [s.code, s]));
+  let added = 0, renamed = 0;
+  for (const { code: c, name: n } of list) {
+    const code = normalizeStoreCode(c), name = String(n || '').trim(); if (!code || !name) continue;
+    const cur = byCode.get(code);
+    if (!cur) { byCode.set(code, await insert('stores', { code, name, area: '', note: '', active: true, source: 'team' })); added++; }
+    else if (cur.name !== name) { await update('stores', cur.id, cur.version, { name }); renamed++; }
+  }
+  await audit({ entity: 'store', entityId: 'team-list', action: 'team_sync', after: { added, renamed } });
+  return { added, renamed, total: list.length };
+}
+
 export async function editStore(id, version, patch, reason = '') {
   if (patch.code != null) {
     patch.code = normalizeStoreCode(patch.code);
